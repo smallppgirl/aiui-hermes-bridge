@@ -2,6 +2,10 @@
   "pages": [
     "pages/index/index"
   ],
+  "permissions": [
+    "CAMERA",
+    "RECORD_AUDIO"
+  ],
   "window": {
     "navigationBarTitleText": "Hermes Bridge"
   }

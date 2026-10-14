@@ -112,23 +112,27 @@ export default {
 
   // implement voice capture with the AIUI speech API
   async getVoiceInput() {
-    // AIUI speech: `SpeechRecognition` (simple) or `SpeechRecognitionSession`
-    // (recorded/incremental audio via MediaRecorder). Verify the exact
-    // start() signature, OR whether the spoken query already arrives via
-    // onLoad(query) on semantic wake-up ("Hi Rokid, open the xxx agent").
-    if (typeof SpeechRecognition !== 'undefined') {
-      try {
-        const rec = await SpeechRecognition.start({ lang: BRIDGE_CONFIG.lang })
-        return await new Promise((resolve) => {
-          rec.onresult = (e) => resolve((e.results && e.results[e.resultIndex] && e.results[e.resultIndex][0] && e.results[e.resultIndex][0].transcript) || '')
-          rec.onerror = () => resolve('')
-          rec.onend = () => resolve('')
-        })
-      } catch (e) {
-        // not available / non-interactive here
+    // AIUI SpeechRecognition: new SpeechRecognition(), set lang, onresult -> transcript.
+    // start() requires an interactive (user-gesture) context; onLoad is non-interactive.
+    if (typeof SpeechRecognition === 'undefined') return ''
+    return await new Promise((resolve) => {
+      const rec = new SpeechRecognition()
+      rec.lang = BRIDGE_CONFIG.lang
+      rec.interimResults = false
+      let final = ''
+      rec.onresult = (e) => {
+        const r = e.results && e.results[e.resultIndex] && e.results[e.resultIndex][0]
+        if (r && r.transcript) final = r.transcript
       }
-    }
-    return ''
+      rec.onerror = () => { try { rec.abort() } catch (_) {}; resolve(final) }
+      rec.onend = () => resolve(final)
+      try {
+        rec.start()
+      } catch (e) {
+        // non-interactive / not supported here
+        resolve(final)
+      }
+    })
   },
 
   // capture a photo with the AIUI camera API and send it with the query (vision)
@@ -177,8 +181,9 @@ export default {
     if (q && typeof q === 'string' && q.trim()) {
       this.ask(q.trim())
     } else {
-      // otherwise capture the next utterance (Zhangzhu "image" one-shot behaviour)
-      this.captureAndAsk()
+      // AIUI SpeechRecognition requires a user gesture (interactive), so do NOT
+      // auto-start ASR on load. Show the speak button; the user presses to talk.
+      this.setData({ status: 'ready', answerText: '' })
     }
   },
 }

@@ -165,13 +165,11 @@ export default {
       this.stop()
       return
     }
-    if (!this.data.focused && (event.code === 'Enter' || event.code === 'GlobalHook')) {
-      this.setData({ focused: true })
-      return
-    }
-    if (this.data.focused && event.code === 'Enter') {
+    // temple tap (GlobalHook) or Enter = start talking (valid user gesture
+    // so SpeechRecognition is allowed to open the mic)
+    if (event.code === 'GlobalHook' || event.code === 'Enter') {
       this.captureAndAsk()
-      this.setData({ focused: false })
+      return
     }
   },
 

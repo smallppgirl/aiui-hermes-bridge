@@ -12,6 +12,7 @@ export default {
     focused: false,
     status: 'ready',        // ready | listening | working | done
     answerText: '',
+    inConversation: false,
   },
 
   // ---- call the Hermes/Claude bridge and render the answer ----
@@ -67,8 +68,10 @@ export default {
     }
   },
 
-  // stop the current in-flight request
+  // stop the current in-flight request + conversation loop
   stop() {
+    this._stopped = true
+    if (this._rec) { try { this._rec.abort() } catch (_) {} this._rec = null }
     if (this._abort) this._abort.abort()
   },
 
@@ -90,24 +93,48 @@ export default {
     } catch (e) { /* ignore */ }
   },
 
-  // ---- capture voice via the AIUI/SDK speech API ---------------
-  // TODO: replace with the real AIUI voice/ASR API (see the AIUI Dev skill).
-  // The glasses' native assistant uses "Hi Rokid" / STT. Below is a placeholder
-  // that pulls text from whatever the AIUI runtime exposes.
+  // ---- enter continuous conversation: tap once, then keep asking ----
   async captureAndAsk() {
-    this.setData({ status: 'listening', answerText: '' })
-    let text = ''
-    try {
-      // Example possibilities — pick the one your AIUI SDK exposes:
-      //  text = await rokid.ai.speechToText()
-      //  text = await this.getVoiceInput()
-      //  text = await window.rokid?.asr?.listen()
-      text = await this.getVoiceInput()   // <-- implement in the AIUI SDK
-    } catch (e) {
-      this.setData({ status: 'ready', answerText: '（取不了语音：' + (e && e.message || e) + '）' })
-      return
+    this.setData({ inConversation: true, status: 'listening', answerText: '' })
+    let guard = 0
+    while (!this._stopped && this.data.inConversation && guard < 30) {
+      guard++
+      this.setData({ status: 'listening' })
+      let text = ''
+      try {
+        text = await this.getVoiceInput()
+      } catch (e) {
+        this.setData({ status: 'ready', answerText: '（取不了语音：' + (e && e.message || e) + '）' })
+        break
+      }
+      if (this._stopped) break
+      if (!text) {
+        // nothing recognised — stop the loop, wait for another gesture (tap)
+        this.setData({ status: 'ready', answerText: '', inConversation: false })
+        break
+      }
+      if (this._isExit(text)) {
+        this._endConversation()
+        break
+      }
+      await this.ask(text)
+      if (this._stopped) break
+      // small pause so the user hears the answer, then listen again
+      await this._delay(600)
     }
-    await this.ask(text || '你好')
+    if (this._stopped) this.setData({ status: 'ready', inConversation: false })
+  },
+
+  _isExit(text) {
+    return /^(退出|停止|结束|exit|stop|bye)$/i.test((text || '').trim())
+  },
+
+  _endConversation() {
+    this.setData({ status: 'ready', inConversation: false, answerText: '（会话已结束）' })
+  },
+
+  _delay(ms) {
+    return new Promise((r) => setTimeout(r, ms))
   },
 
   // implement voice capture with the AIUI speech API
@@ -117,6 +144,7 @@ export default {
     if (typeof SpeechRecognition === 'undefined') return ''
     return await new Promise((resolve) => {
       const rec = new SpeechRecognition()
+      this._rec = rec
       rec.lang = BRIDGE_CONFIG.lang
       rec.interimResults = false
       let final = ''
@@ -124,8 +152,8 @@ export default {
         const r = e.results && e.results[e.resultIndex] && e.results[e.resultIndex][0]
         if (r && r.transcript) final = r.transcript
       }
-      rec.onerror = () => { try { rec.abort() } catch (_) {}; resolve(final) }
-      rec.onend = () => resolve(final)
+      rec.onerror = () => { try { rec.abort() } catch (_) {}; this._rec = null; resolve(final) }
+      rec.onend = () => { this._rec = null; resolve(final) }
       try {
         rec.start()
       } catch (e) {
@@ -174,6 +202,7 @@ export default {
   },
 
   onLoad(query) {
+    this._stopped = false
     // semantic wake-up: "Hi Rokid, open the xxx agent" may pass the spoken query.
     const q = query && (query.text || query.query || query.q)
     if (q && typeof q === 'string' && q.trim()) {
@@ -184,13 +213,19 @@ export default {
       this.setData({ status: 'ready', answerText: '' })
     }
   },
+
+  onUnload() {
+    this._stopped = true
+    if (this._rec) { try { this._rec.abort() } catch (_) {} this._rec = null }
+    if (this._abort) this._abort.abort()
+  },
 }
 </script>
 
 <page>
   <view class="container">
     <text class="title">Hermes · {{ status }}</text>
-    <text class="answer">{{ answerText || '按一下输入，或直接对它说话' }}</text>
+    <text class="answer">{{ answerText || (status === 'listening' ? '请讲…' : '轻按眼镜腿或点「说话」开始；说「退出」结束') }}</text>
     <button class="{{ focused ? 'focused' : '' }}" bindtap="captureAndAsk">说话</button>
   </view>
 </page>

@@ -6,6 +6,7 @@ bridge over SSE and renders the streamed answer on the glasses HUD.
 ## What this IS
 - Real, working logic: **POST to your bridge → parse the SSE stream (`data: {...answer_stream...}`) → render the text live** on the glasses page.
 - Uses the official AIUI project shape (`app.json` / `app.js` / `pages/index/index.ink` + `config.js`), scaffolded from `@yodaos-pkg/aiui-agent`.
+- **Continuous conversation:** tap the temple (`GlobalHook`) or Enter once to begin, then it listens → asks the bridge → reads/render the answer → auto-listens for the next question, looping until you say `退出/停止/exit/stop` or press Backspace/Esc. AIUI `SpeechRecognition.start()` needs a user gesture, so the first utterance needs a tap OR include the question in the wake phrase ("Hi Rokid, open hermes, <question>").
 
 ## What you MUST fill in / verify (unknowns, marked TODO in index.ink)
 1. **Bridge URL + AK** — edit `config.js`: set `url` (`https://rokid-hermes.snowbig.com/api/sse` for Hermes,

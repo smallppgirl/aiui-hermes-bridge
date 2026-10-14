@@ -15,8 +15,8 @@ export default {
   },
 
   // ---- call the Hermes/Claude bridge and render the answer ----
-  async ask(text) {
-    if (!text) return
+  async ask(text, imageDataUrl) {
+    if (!text && !imageDataUrl) return
     this.setData({ status: 'working', answerText: '' })
     if (this._abort) this._abort.abort()
     const ctrl = (this._abort = new AbortController())
@@ -28,7 +28,7 @@ export default {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer ' + BRIDGE_CONFIG.ak,
         },
-        body: JSON.stringify(buildPayload(text)),
+        body: JSON.stringify(buildPayload(text || '', imageDataUrl)),
         signal: ctrl.signal,
       })
       const reader = resp.body && typeof resp.body.getReader === 'function'
@@ -118,7 +118,7 @@ export default {
     // onLoad(query) on semantic wake-up ("Hi Rokid, open the xxx agent").
     if (typeof SpeechRecognition !== 'undefined') {
       try {
-        const rec = await SpeechRecognition.start({ lang: 'zh-CN' })
+        const rec = await SpeechRecognition.start({ lang: BRIDGE_CONFIG.lang })
         return await new Promise((resolve) => {
           rec.onresult = (e) => resolve((e.results && e.results[e.resultIndex] && e.results[e.resultIndex][0] && e.results[e.resultIndex][0].transcript) || '')
           rec.onerror = () => resolve('')
@@ -131,13 +131,29 @@ export default {
     return ''
   },
 
-  // optional: capture a photo and send it with the query (vision)
+  // capture a photo with the AIUI camera API and send it with the query (vision)
   async askWithPhoto(text) {
-    // TODO: use the AIUI camera API to get an image (data URL or http URL),
-    // then call askByMessage with an extra image message.
-    // For the Hermes B bridge the request body can carry:
-    //   message: [{role:'user',type:'text',text}, {role:'user',type:'image',image_url}]
-    await this.ask(text)
+    let imageDataUrl = ''
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+      const track = stream.getVideoTracks()[0]
+      const capture = new ImageCapture(track)
+      const blob = await capture.takePhoto({ mode: 'default' })
+      imageDataUrl = await this._blobToDataUrl(blob)
+      stream.getTracks().forEach(t => t.stop())
+    } catch (e) {
+      // no camera / permission denied — fall back to text only
+    }
+    await this.ask(text || '看看这个', imageDataUrl || undefined)
+  },
+
+  _blobToDataUrl(blob) {
+    return new Promise((resolve) => {
+      const fr = new FileReader()
+      fr.onload = () => resolve(fr.result)
+      fr.onerror = () => resolve('')
+      fr.readAsDataURL(blob)
+    })
   },
 
   onKeyUp(event) {
@@ -155,9 +171,15 @@ export default {
     }
   },
 
-  onLoad() {
-    // auto-grab the first utterance on open (like the Lingzhu "图片" one-shot)
-    this.captureAndAsk()
+  onLoad(query) {
+    // semantic wake-up: "Hi Rokid, open the xxx agent" may pass the spoken query.
+    const q = query && (query.text || query.query || query.q)
+    if (q && typeof q === 'string' && q.trim()) {
+      this.ask(q.trim())
+    } else {
+      // otherwise capture the next utterance (Zhangzhu "image" one-shot behaviour)
+      this.captureAndAsk()
+    }
   },
 }
 </script>

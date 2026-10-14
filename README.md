@@ -11,14 +11,8 @@ bridge over SSE and renders the streamed answer on the glasses HUD.
 1. **Bridge URL + AK** — edit `config.js`: set `url` (`https://rokid-hermes.snowbig.com/api/sse` for Hermes,
    `https://rokid-claude.snowbig.com/rokid/sse` for Claude), `agentId`, and `ak` (= the bridge's
    `ROKID_AK` (Hermes xdc) or `ROKID_AGENT_AK` (Claude)), `userId`.
-2. **Voice capture** — `getVoiceInput()` now uses the AIUI `SpeechRecognition` API (`start({lang})` + `onresult → transcript`).
-   On a semantic wake-up ("Hi Rokid, open the xxx agent") the spoken query may instead arrive via `onLoad(query)`;
-   confirm which model the host uses, and adjust (AIUI CODING with the aiui-dev skill can wire it). See `apis/ai.md`
-   for `SpeechRecognition` / `SpeechRecognitionSession` / `LanguageModel`.
-3. **Camera (vision)** — `askWithPhoto()` is a placeholder; to send a photo, capture with the AIUI camera API
-   (see `apis/media.md` / `apis/wx.md` camera) and add a second `{role:'user', type:'image', image_url}` message
-   to the payload (both bridges accept `image` messages; the HTTP body can also carry the same `LanguageModel`
-   `image_url` part shape). The AIUI runtime supports `fetch`/`Response`/streams (see `apis/web.md`).
+2. **Voice capture** — `getVoiceInput()` uses the AIUI `SpeechRecognition` API (`start({lang: BRIDGE_CONFIG.lang})` + `onresult → transcript`). Set `lang` in `config.js`: `'zh-CN'` (default) or `'en-US'` (English — supported, TTS has several English voices). On a semantic wake-up the spoken query may instead arrive via `onLoad(query)` (handled); confirm which model the host uses.
+3. **Camera (vision)** — `askWithPhoto()` captures via `navigator.mediaDevices.getUserMedia({video})` → `ImageCapture.takePhoto({mode:'default'})` → base64 data URL, and sends it as a second `{role:'user', type:'image_url', image_url:{url}}` message. **NOTE:** the bridge's exact image transport field/shape may differ (Hermes B converts to base64, Claude downloads from an http URL) — confirm/adapt before relying on vision.
 4. **Streaming support** — the code uses `resp.body.getReader()` if available, else buffers the full
    body (some mini-app runtimes don't stream). Verify whether the AIUI runtime streams; if not it
    will show the full answer at once (no live progress) — still works.

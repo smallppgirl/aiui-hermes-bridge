@@ -9,16 +9,23 @@ export const BRIDGE_CONFIG = {
   // AK = the ROKID_AK / ROKID_AGENT_AK from the bridge .env
   ak: "REPLACE_WITH_BRIDGE_AK",
   userId: "aiui-rokit",
+  // voice recognition language: 'zh-CN' (default) or 'en-US' (English)
+  lang: "zh-CN",
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.
-export function buildPayload(text, extra = {}) {
+export function buildPayload(text, imageDataUrl) {
+  const message = [{ role: "user", type: "text", text }]
+  if (imageDataUrl) {
+    // AIUI captures photos as a base64 data URL. Bridge image transport may
+    // expect its own field/shape (see README) — adjust for your bridge.
+    message.push({ role: "user", type: "image_url", image_url: { url: imageDataUrl } })
+  }
   return {
     message_id: "aiui-" + Date.now(),
     agent_id: BRIDGE_CONFIG.agentId,
     user_id: BRIDGE_CONFIG.userId,
-    message: [{ role: "user", type: "text", text }],
-    metadata: { context: { language: "zh-CN" } },
-    ...extra,
+    message,
+    metadata: { context: { language: BRIDGE_CONFIG.lang } },
   };
 }

@@ -1,0 +1,7 @@
+{
+  "name": "aiui-hermes-bridge",
+  "version": "1.0.0",
+  "description": "AIUI agent that calls Andy's Hermes/Claude bridge over SSE and renders the answer on Rokid Glasses.",
+  "main": "app.js",
+  "dependencies": {}
+}

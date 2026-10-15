@@ -28,13 +28,15 @@ export default {
       const ctrl = (this._abort = new AbortController())
       const timer = setTimeout(() => ctrl.abort(), 120000)   // 2-minute cap
       try {
+        const payload = buildPayload(text || '', imageDataUrl)
+        if (this._asrLang) payload.metadata.language = this._asrLang
         const resp = await fetch(BRIDGE_CONFIG.url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': 'Bearer ' + BRIDGE_CONFIG.ak,
           },
-          body: JSON.stringify(buildPayload(text || '', imageDataUrl)),
+          body: JSON.stringify(payload),
           signal: ctrl.signal,
           timeout: 60000,   // try to raise the runtime's short default (ignored if unsupported)
         })

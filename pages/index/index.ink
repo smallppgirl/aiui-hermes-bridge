@@ -13,6 +13,7 @@ export default {
     status: 'ready',        // ready | listening | working | done
     answerText: '',
     inConversation: false,
+    strings: {},            // set in onLoad from the system language
   },
 
   // ---- call the Hermes/Claude bridge and render the answer ----
@@ -130,7 +131,7 @@ export default {
   },
 
   _endConversation() {
-    this.setData({ status: 'ready', inConversation: false, answerText: '（会话已结束）' })
+    this.setData({ status: 'ready', inConversation: false, answerText: (this.data.strings && this.data.strings.ended) || '（会话已结束）' })
   },
 
   _delay(ms) {
@@ -145,7 +146,7 @@ export default {
     return await new Promise((resolve) => {
       const rec = new SpeechRecognition()
       this._rec = rec
-      rec.lang = BRIDGE_CONFIG.lang
+      rec.lang = this._asrLang || BRIDGE_CONFIG.lang
       rec.interimResults = false
       let final = ''
       rec.onresult = (e) => {
@@ -203,6 +204,11 @@ export default {
 
   onLoad(query) {
     this._stopped = false
+    // follow the system / Hi Rokid language for both UI + speech recognition
+    this._asrLang = (BRIDGE_CONFIG.lang && BRIDGE_CONFIG.lang !== 'auto')
+      ? BRIDGE_CONFIG.lang
+      : (typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US')
+    this.setData({ strings: this._strings(this._asrLang) })
     // semantic wake-up: "Hi Rokid, open the xxx agent" may pass the spoken query.
     const q = query && (query.text || query.query || query.q)
     if (q && typeof q === 'string' && q.trim()) {
@@ -211,6 +217,24 @@ export default {
       // AIUI SpeechRecognition requires a user gesture (interactive), so do NOT
       // auto-start ASR on load. Show the speak button; the user presses to talk.
       this.setData({ status: 'ready', answerText: '' })
+    }
+  },
+
+  // UI strings by language; zh for zh-*, otherwise English
+  _strings(lang) {
+    const zh = /^zh/i.test(lang || '')
+    return zh ? {
+      chipReady: '就绪', chipListening: '聆听中', chipThinking: '思考中',
+      idle: '轻按眼镜腿开始对话', say: '请讲…', working: '正在处理…',
+      talk: '说话', hintIdle: '眼镜腿 tap = 开始 · 说「退出」结束',
+      hintListening: '正在听 · 说完即可', hintWorking: '请稍候',
+      ended: '（会话已结束）',
+    } : {
+      chipReady: 'READY', chipListening: 'LISTENING', chipThinking: 'THINKING',
+      idle: 'Tap the temple to start', say: 'Your turn…', working: 'Working…',
+      talk: 'Talk', hintIdle: 'temple tap = start · say "exit" to stop',
+      hintListening: 'listening · just speak', hintWorking: 'one moment',
+      ended: '(conversation ended)',
     }
   },
 
@@ -226,14 +250,14 @@ export default {
   <view class="app">
     <view class="head">
       <text class="brand">◈ HERMES</text>
-      <text class="chip">{{ status === 'listening' ? 'LISTENING' : status === 'working' ? 'THINKING' : 'READY' }}</text>
+      <text class="chip">{{ status === 'listening' ? strings.chipListening : status === 'working' ? strings.chipThinking : strings.chipReady }}</text>
     </view>
     <view class="body">
-      <text class="answer">{{ answerText || (status === 'listening' ? '请讲…' : status === 'working' ? '正在处理…' : '轻按眼镜腿开始对话') }}</text>
+      <text class="answer">{{ answerText || (status === 'listening' ? strings.say : status === 'working' ? strings.working : strings.idle) }}</text>
     </view>
     <view class="foot">
-      <button class="talk {{ status === 'listening' ? 'listening' : status === 'working' ? 'working' : '' }}" bindtap="captureAndAsk">{{ status === 'listening' ? '聆听中…' : status === 'working' ? '思考中…' : '说话' }}</button>
-      <text class="hint">{{ status === 'listening' ? '正在听 · 说完即可' : status === 'working' ? '请稍候' : '眼镜腿 tap = 开始对话 · 说「退出」结束' }}</text>
+      <button class="talk {{ status === 'listening' ? 'listening' : status === 'working' ? 'working' : '' }}" bindtap="captureAndAsk">{{ strings.talk }}</button>
+      <text class="hint">{{ status === 'listening' ? strings.hintListening : status === 'working' ? strings.hintWorking : strings.hintIdle }}</text>
     </view>
   </view>
 </page>

@@ -9,8 +9,9 @@ export const BRIDGE_CONFIG = {
   // AK = the ROKID_AK / ROKID_AGENT_AK from the bridge .env
   ak: "REPLACE_WITH_BRIDGE_AK",
   userId: "aiui-rokit",
-  // voice recognition language: 'zh-CN' (default) or 'en-US' (English)
-  lang: "zh-CN",
+  // voice recognition language: 'auto' (follow the system / Hi Rokid language),
+  // or force e.g. 'zh-CN' / 'en-US'
+  lang: "auto",
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.

@@ -223,45 +223,94 @@ export default {
 </script>
 
 <page>
-  <view class="container">
-    <text class="title">Hermes · {{ status }}</text>
-    <text class="answer">{{ answerText || (status === 'listening' ? '请讲…' : '轻按眼镜腿或点「说话」开始；说「退出」结束') }}</text>
-    <button class="{{ focused ? 'focused' : '' }}" bindtap="captureAndAsk">说话</button>
+  <view class="app">
+    <view class="head">
+      <text class="brand">◈ HERMES</text>
+      <text class="chip">{{ status === 'listening' ? 'LISTENING' : status === 'working' ? 'THINKING' : 'READY' }}</text>
+    </view>
+    <view class="body">
+      <text class="answer">{{ answerText || (status === 'listening' ? '请讲…' : status === 'working' ? '正在处理…' : '轻按眼镜腿开始对话') }}</text>
+    </view>
+    <view class="foot">
+      <button class="talk {{ status === 'listening' ? 'listening' : status === 'working' ? 'working' : '' }}" bindtap="captureAndAsk">{{ status === 'listening' ? '聆听中…' : status === 'working' ? '思考中…' : '说话' }}</button>
+      <text class="hint">{{ status === 'listening' ? '正在听 · 说完即可' : status === 'working' ? '请稍候' : '眼镜腿 tap = 开始对话 · 说「退出」结束' }}</text>
+    </view>
   </view>
 </page>
 
 <style>
-.container {
+.app {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   height: 100vh;
+  padding: 14px 16px 20px;
+  box-sizing: border-box;
 }
-.title {
-  color: #40FF5E;
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   width: 100%;
-  text-align: center;
-  font-size: 22px;
-  margin-bottom: 16px;
+}
+.brand {
+  color: #40FF5E;
+  font-size: 18px;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+.chip {
+  color: #123a1d;
+  background: #40FF5E;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+.body {
+  flex: 1;
+  display: flex;
+  align-items: center;
 }
 .answer {
   color: #40FF5E;
-  width: 88%;
+  width: 100%;
   text-align: left;
-  font-size: 18px;
-  line-height: 24px;
-  margin-bottom: 20px;
+  font-size: 20px;
+  line-height: 30px;
   white-space: pre-wrap;
 }
-button {
-  color: #40FF5E;
-  border: 1px solid #40ff5d42;
-  border-radius: 12px;
-  padding: 5px;
-  width: 100px;
-  line-height: 24px;
-  text-align: center;
+.foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
-button.focused { border: 2px solid #40FF5E; }
+.talk {
+  color: #40FF5E;
+  border: 1px solid #40ff5d55;
+  border-radius: 999px;
+  padding: 8px 26px;
+  font-size: 16px;
+  line-height: 20px;
+  text-align: center;
+  transition: all .2s;
+}
+.talk.listening {
+  border: 2px solid #40FF5E;
+  animation: pulse 1.1s ease-in-out infinite;
+}
+.talk.working {
+  border: 1px dashed #40FF5E;
+  opacity: .8;
+}
+.hint {
+  color: #2aa046;
+  font-size: 13px;
+  margin-top: 10px;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(64,255,94,.5); }
+  50% { box-shadow: 0 0 0 8px rgba(64,255,94,0); }
+}
 </style>

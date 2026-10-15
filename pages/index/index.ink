@@ -21,52 +21,65 @@ export default {
   async ask(text, imageDataUrl) {
     if (!text && !imageDataUrl) return
     this.setData({ status: 'working', answerText: '' })
-    if (this._abort) this._abort.abort()
-    const ctrl = (this._abort = new AbortController())
-    const timer = setTimeout(() => ctrl.abort(), 120000)   // 2-minute cap
-    try {
-      const resp = await fetch(BRIDGE_CONFIG.url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + BRIDGE_CONFIG.ak,
-        },
-        body: JSON.stringify(buildPayload(text || '', imageDataUrl)),
-        signal: ctrl.signal,
-      })
-      const reader = resp.body && typeof resp.body.getReader === 'function'
-        ? resp.body.getReader()
-        : null
-      const dec = new TextDecoder()
-      let buffer = ''
-      const feed = (chunk) => {
-        buffer += chunk
-        let i
-        while ((i = buffer.indexOf('\n\n')) >= 0) {
-          this._consumeSse(buffer.slice(0, i).replace(/\r/g, ''))
-          buffer = buffer.slice(i + 2)
+    let attempts = 0
+    while (attempts < 2 && !this._stopped) {
+      attempts++
+      if (this._abort) this._abort.abort()
+      const ctrl = (this._abort = new AbortController())
+      const timer = setTimeout(() => ctrl.abort(), 120000)   // 2-minute cap
+      try {
+        const resp = await fetch(BRIDGE_CONFIG.url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer ' + BRIDGE_CONFIG.ak,
+          },
+          body: JSON.stringify(buildPayload(text || '', imageDataUrl)),
+          signal: ctrl.signal,
+          timeout: 60000,   // try to raise the runtime's short default (ignored if unsupported)
+        })
+        const reader = resp.body && typeof resp.body.getReader === 'function'
+          ? resp.body.getReader()
+          : null
+        const dec = new TextDecoder()
+        let buffer = ''
+        const feed = (chunk) => {
+          buffer += chunk
+          let i
+          while ((i = buffer.indexOf('\n\n')) >= 0) {
+            this._consumeSse(buffer.slice(0, i).replace(/\r/g, ''))
+            buffer = buffer.slice(i + 2)
+          }
         }
-      }
-      if (reader) {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          feed(dec.decode(value, { stream: true }))
+        if (reader) {
+          for (;;) {
+            const { done, value } = await reader.read()
+            if (done) break
+            feed(dec.decode(value, { stream: true }))
+          }
+          if (buffer) this._consumeSse(buffer.replace(/\r/g, ''))
+        } else {
+          // some mini-app runtimes buffer the whole body instead of streaming
+          feed(await resp.text())
         }
-        if (buffer) this._consumeSse(buffer.replace(/\r/g, ''))
-      } else {
-        // some mini-app runtimes buffer the whole body instead of streaming
-        feed(await resp.text())
+        this.setData({ status: 'done' })
+        return
+      } catch (e) {
+        if (attempts < 2 && e && e.name !== 'AbortError' && !this._stopped) {
+          // transient network timeout — retry once
+          this.setData({ status: 'working' })
+          await this._delay(500)
+          continue
+        }
+        const msg = (e && e.name === 'AbortError')
+          ? '（已停止）'
+          : ('（连接失败：' + (e && e.message || e) + '）')
+        this.setData({ status: 'ready', answerText: msg })
+        return
+      } finally {
+        clearTimeout(timer)
+        this._abort = null
       }
-      this.setData({ status: 'done' })
-    } catch (e) {
-      const msg = (e && e.name === 'AbortError')
-        ? '（已停止）'
-        : ('（连接失败：' + (e && e.message || e) + '）')
-      this.setData({ status: 'ready', answerText: msg })
-    } finally {
-      clearTimeout(timer)
-      this._abort = null
     }
   },
 
@@ -99,6 +112,7 @@ export default {
   async captureAndAsk() {
     this.setData({ inConversation: true, status: 'listening', answerText: '' })
     let guard = 0
+    let silentTries = 0
     while (!this._stopped && this.data.inConversation && guard < 30) {
       guard++
       this.setData({ status: 'listening' })
@@ -111,10 +125,16 @@ export default {
       }
       if (this._stopped) break
       if (!text) {
-        // nothing recognised — stop the loop, wait for another gesture (tap)
-        this.setData({ status: 'ready', answerText: '', inConversation: false })
-        break
+        // no final speech yet — stay in listening, retry a few times before giving up
+        silentTries++
+        if (silentTries >= 3) {
+          this.setData({ status: 'ready', answerText: '', inConversation: false })
+          break
+        }
+        await this._delay(500)
+        continue
       }
+      silentTries = 0
       if (this._isExit(text)) {
         this._endConversation()
         break
@@ -141,26 +161,30 @@ export default {
 
   // implement voice capture with the AIUI speech API
   async getVoiceInput() {
-    // AIUI SpeechRecognition: new SpeechRecognition(), set lang, onresult -> transcript.
-    // start() requires an interactive (user-gesture) context; onLoad is non-interactive.
     if (typeof SpeechRecognition === 'undefined') return ''
     return await new Promise((resolve) => {
       const rec = new SpeechRecognition()
       this._rec = rec
       rec.lang = this._asrLang || BRIDGE_CONFIG.lang
-      rec.interimResults = false
-      let final = ''
+      rec.interimResults = true            // stream provisional results
+      rec.continuous = false
+      let finalText = ''
       rec.onresult = (e) => {
-        const r = e.results && e.results[e.resultIndex] && e.results[e.resultIndex][0]
-        if (r && r.transcript) final = r.transcript
+        const results = e.results
+        if (!results) return
+        // keep the latest FINAL transcript
+        for (let i = e.resultIndex; i < results.length; i++) {
+          const r = results[i]
+          if (r && r.isFinal && r[0] && r[0].transcript) finalText = r[0].transcript
+        }
       }
-      rec.onerror = () => { try { rec.abort() } catch (_) {}; this._rec = null; resolve(final) }
-      rec.onend = () => { this._rec = null; resolve(final) }
+      rec.onerror = () => { try { rec.abort() } catch (_) {}; this._rec = null; resolve(finalText) }
+      rec.onend = () => { this._rec = null; resolve(finalText) }
       try {
         rec.start()
       } catch (e) {
         // non-interactive / not supported here
-        resolve(final)
+        resolve(finalText)
       }
     })
   },

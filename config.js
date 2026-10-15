@@ -15,6 +15,10 @@ export const BRIDGE_CONFIG = {
   // on-screen "Talk" button. false = hidden (use the temple tap / Enter instead),
   // true = show it as a fallback if the temple tap isn't delivered on your device.
   showTalkButton: false,
+  // read the answer aloud with TTS after rendering (true) or text-only (false).
+  // NOTE: with continuous listening this may capture the glasses' own TTS (echo);
+  // if that happens, set this to false (text-only, mic stays clean).
+  readAloud: true,
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.

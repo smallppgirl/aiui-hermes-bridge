@@ -88,6 +88,8 @@ export default {
     this._stopped = true
     if (this._rec) { try { this._rec.abort() } catch (_) {} this._rec = null }
     if (this._abort) this._abort.abort()
+    this._busy = false
+    this.setData({ status: 'ready', inConversation: false })
   },
 
   // parse one SSE block:  data:{...answer_stream...}
@@ -108,43 +110,71 @@ export default {
     } catch (e) { /* ignore */ }
   },
 
-  // ---- enter continuous conversation: tap once, then keep asking ----
-  async captureAndAsk() {
+  // ---- continuous voice conversation (one tap, mic stays hot, no per-turn tap) ----
+  captureAndAsk() {
+    this._startListening()
+  },
+
+  _startListening() {
+    if (this._rec) { this.setData({ status: 'listening' }); return }
+    if (typeof SpeechRecognition === 'undefined') { this.setData({ status: 'ready' }); return }
+    this._stopped = false
     this.setData({ inConversation: true, status: 'listening', answerText: '' })
-    let guard = 0
-    let silentTries = 0
-    while (!this._stopped && this.data.inConversation && guard < 30) {
-      guard++
-      this.setData({ status: 'listening' })
-      let text = ''
-      try {
-        text = await this.getVoiceInput()
-      } catch (e) {
-        this.setData({ status: 'ready', answerText: '（取不了语音：' + (e && e.message || e) + '）' })
-        break
-      }
-      if (this._stopped) break
-      if (!text) {
-        // no final speech yet — stay in listening, retry a few times before giving up
-        silentTries++
-        if (silentTries >= 3) {
-          this.setData({ status: 'ready', answerText: '', inConversation: false })
-          break
+    const rec = new SpeechRecognition()
+    this._rec = rec
+    rec.lang = this._asrLang || BRIDGE_CONFIG.lang
+    rec.continuous = true
+    rec.interimResults = true
+    rec.onresult = (e) => {
+      const results = e.results
+      if (!results) return
+      for (let i = e.resultIndex; i < results.length; i++) {
+        const r = results[i]
+        if (r && r.isFinal && r[0] && r[0].transcript) {
+          this._handleUtterance(r[0].transcript)
         }
-        await this._delay(500)
-        continue
       }
-      silentTries = 0
-      if (this._isExit(text)) {
-        this._endConversation()
-        break
-      }
-      await this.ask(text)
-      if (this._stopped) break
-      // small pause so the user hears the answer, then listen again
-      await this._delay(600)
     }
-    if (this._stopped) this.setData({ status: 'ready', inConversation: false })
+    rec.onerror = () => {}
+    rec.onend = () => { this._rec = null }
+    try {
+      rec.start()
+    } catch (e) {
+      this._rec = null
+      this.setData({ status: 'ready' })
+    }
+  },
+
+  _handleUtterance(text) {
+    if (this._busy) return
+    this._busy = true
+    const t = (text || '').trim()
+    if (!t) { this._busy = false; return }
+    if (this._isExit(t)) { this._endConversation(); this._busy = false; return }
+    this.ask(t).then(async () => {
+      const ans = this.data.answerText
+      if (BRIDGE_CONFIG.readAloud !== false && ans) {
+        // keep mic ignored (busy) while reading aloud, so TTS isn't captured
+        await this._speakAsync(ans)
+      }
+      this._busy = false
+      if (this._rec) { this.setData({ status: 'listening' }) }
+      else { this.setData({ status: 'ready', inConversation: false }) }
+    })
+  },
+
+  _speakAsync(text) {
+    return new Promise((resolve) => {
+      try {
+        if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
+          const u = new SpeechSynthesisUtterance(text)
+          u.onend = () => resolve()
+          u.onerror = () => resolve()
+          speechSynthesis.speak(u)
+          setTimeout(resolve, Math.min(60000, 1000 + text.length * 80))  // fallback
+        } else { resolve() }
+      } catch (e) { resolve() }
+    })
   },
 
   _isExit(text) {
@@ -152,41 +182,13 @@ export default {
   },
 
   _endConversation() {
+    if (this._rec) { try { this._rec.stop() } catch (_) {} this._rec = null }
+    this._busy = false
     this.setData({ status: 'ready', inConversation: false, answerText: (this.data.strings && this.data.strings.ended) || '（会话已结束）' })
   },
 
   _delay(ms) {
     return new Promise((r) => setTimeout(r, ms))
-  },
-
-  // implement voice capture with the AIUI speech API
-  async getVoiceInput() {
-    if (typeof SpeechRecognition === 'undefined') return ''
-    return await new Promise((resolve) => {
-      const rec = new SpeechRecognition()
-      this._rec = rec
-      rec.lang = this._asrLang || BRIDGE_CONFIG.lang
-      rec.interimResults = true            // stream provisional results
-      rec.continuous = false
-      let finalText = ''
-      rec.onresult = (e) => {
-        const results = e.results
-        if (!results) return
-        // keep the latest FINAL transcript
-        for (let i = e.resultIndex; i < results.length; i++) {
-          const r = results[i]
-          if (r && r.isFinal && r[0] && r[0].transcript) finalText = r[0].transcript
-        }
-      }
-      rec.onerror = () => { try { rec.abort() } catch (_) {}; this._rec = null; resolve(finalText) }
-      rec.onend = () => { this._rec = null; resolve(finalText) }
-      try {
-        rec.start()
-      } catch (e) {
-        // non-interactive / not supported here
-        resolve(finalText)
-      }
-    })
   },
 
   // capture a photo with the AIUI camera API and send it with the query (vision)
@@ -268,6 +270,7 @@ export default {
     this._stopped = true
     if (this._rec) { try { this._rec.abort() } catch (_) {} this._rec = null }
     if (this._abort) this._abort.abort()
+    this._busy = false
   },
 }
 </script>

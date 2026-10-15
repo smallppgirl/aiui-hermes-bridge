@@ -1,0 +1,17 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+body{margin:0;background:#000;height:100vh;display:flex;align-items:center;justify-content:center}
+.hud{width:340px;height:340px;background:#0a0f0b;border-radius:20px;padding:20px 22px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:space-between;font-family:Helvetica,Arial,sans-serif;color:#40FF5E}
+.head{display:flex;justify-content:space-between;align-items:center}
+.brand{font-weight:bold;letter-spacing:1px}
+.chip{background:#40FF5E;color:#123a1d;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:bold;letter-spacing:1px}
+.body{flex:1;display:flex;align-items:center}
+.answer{font-size:19px;line-height:28px}
+.foot{display:flex;flex-direction:column;align-items:center}
+.talk{border:2px solid #40FF5E;border-radius:999px;padding:8px 26px;font-size:15px;box-shadow:0 0 0 8px rgba(64,255,94,.12);animation:pulse 1.1s infinite}
+.hint{color:#2aa046;font-size:12px;margin-top:10px}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(64,255,94,.45)}50%{box-shadow:0 0 0 10px rgba(64,255,94,0)}}
+</style></head><body><div class="hud">
+<div class="head"><div class="brand">◈ HERMES</div><div class="chip">LISTENING</div></div>
+<div class="body"><div class="answer">请讲…</div></div>
+<div class="foot"><div class="talk">聆听中…</div><div class="hint">正在听 · 说完即可</div></div>
+</div></body></html>

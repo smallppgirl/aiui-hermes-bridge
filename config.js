@@ -12,6 +12,9 @@ export const BRIDGE_CONFIG = {
   // voice recognition language: 'auto' (follow the system / Hi Rokid language),
   // or force e.g. 'zh-CN' / 'en-US'
   lang: "auto",
+  // on-screen "Talk" button. false = hidden (use the temple tap / Enter instead),
+  // true = show it as a fallback if the temple tap isn't delivered on your device.
+  showTalkButton: false,
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.

@@ -14,6 +14,7 @@ export default {
     answerText: '',
     inConversation: false,
     strings: {},            // set in onLoad from the system language
+    showTalkButton: false,  // from config
   },
 
   // ---- call the Hermes/Claude bridge and render the answer ----
@@ -209,6 +210,7 @@ export default {
       ? BRIDGE_CONFIG.lang
       : (typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US')
     this.setData({ strings: this._strings(this._asrLang) })
+    this.setData({ showTalkButton: BRIDGE_CONFIG.showTalkButton === true })
     // semantic wake-up: "Hi Rokid, open the xxx agent" may pass the spoken query.
     const q = query && (query.text || query.query || query.q)
     if (q && typeof q === 'string' && q.trim()) {
@@ -253,10 +255,11 @@ export default {
       <text class="chip">{{ status === 'listening' ? strings.chipListening : status === 'working' ? strings.chipThinking : strings.chipReady }}</text>
     </view>
     <view class="body">
+      <view class="{{ status === 'listening' ? 'dot' : 'hidden' }}"></view>
       <text class="answer">{{ answerText || (status === 'listening' ? strings.say : status === 'working' ? strings.working : strings.idle) }}</text>
     </view>
     <view class="foot">
-      <button class="talk {{ status === 'listening' ? 'listening' : status === 'working' ? 'working' : '' }}" bindtap="captureAndAsk">{{ strings.talk }}</button>
+      <button class="talk {{ showTalkButton ? '' : 'hidden' }} {{ status === 'listening' ? 'listening' : status === 'working' ? 'working' : '' }}" bindtap="captureAndAsk">{{ strings.talk }}</button>
       <text class="hint">{{ status === 'listening' ? strings.hintListening : status === 'working' ? strings.hintWorking : strings.hintIdle }}</text>
     </view>
   </view>
@@ -297,6 +300,15 @@ export default {
   display: flex;
   align-items: center;
 }
+.dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #40FF5E;
+  margin-right: 12px;
+  flex: 0 0 auto;
+  animation: pulse 1.1s ease-in-out infinite;
+}
 .answer {
   color: #40FF5E;
   width: 100%;
@@ -328,6 +340,7 @@ export default {
   border: 1px dashed #40FF5E;
   opacity: .8;
 }
+.hidden { display: none; }
 .hint {
   color: #2aa046;
   font-size: 13px;

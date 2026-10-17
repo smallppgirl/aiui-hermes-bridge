@@ -9,15 +9,15 @@ import { BRIDGE_CONFIG, buildPayload } from '../../config.js'
 
 const MAX_TURNS = 20      // keep the on-screen dialog bounded
 const MAX_ANSWER = 4000   // cap a single answer's displayed text
+const HAN = /[㐀-鿿豈-﫿]/g
+const count = (s, re) => ((s || '').match(re) || []).length
 
 export default {
   data: {
-    focused: false,
     status: 'ready',        // ready | listening | working | speaking
     chip: '',
     hint: '',
     turns: [],              // dialog history: { id, role: 'user' | 'bot' | 'note', text, pending }
-    drafting: false,        // a live (interim) question line is on screen
     inConversation: false,
     strings: {},            // set in onLoad from the system language
     showTalkButton: false,  // from config
@@ -29,15 +29,12 @@ export default {
   // returns true if an answer was received and rendered, false otherwise.
   async ask(text, imageDataUrl) {
     if (!text && !imageDataUrl) return false
-    const botId = this._nextId()
-    this._botId = botId
+    const botId = (this._botId = this._nextId())
     this._answer = ''
     this._setStatus('working')
     await this._set({ turns: this.data.turns.concat([{ id: botId, role: 'bot', text: '', pending: true }]) })
     this._follow()
-    let attempts = 0
-    while (attempts < 2 && !this._stopped) {
-      attempts++
+    for (let attempt = 1; attempt <= 2 && !this._stopped; attempt++) {
       if (this._abort) this._abort.abort()
       const ctrl = (this._abort = new AbortController())
       const timer = setTimeout(() => ctrl.abort(), 120000)   // 2-minute cap
@@ -46,57 +43,40 @@ export default {
         if (this._asrLang) payload.metadata.language = this._asrLang
         const resp = await fetch(BRIDGE_CONFIG.url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + BRIDGE_CONFIG.ak,
-          },
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + BRIDGE_CONFIG.ak },
           body: JSON.stringify(payload),
           signal: ctrl.signal,
           timeout: 60000,   // try to raise the runtime's short default (ignored if unsupported)
         })
-        if (!resp.ok) {
-          const body = await resp.text().catch(() => '')
-          throw new Error('HTTP ' + resp.status + ' ' + body.slice(0, 120))
-        }
-        const reader = resp.body && typeof resp.body.getReader === 'function'
-          ? resp.body.getReader()
-          : null
+        if (!resp.ok) throw new Error('HTTP ' + resp.status + ' ' + (await resp.text().catch(() => '')).slice(0, 120))
         const dec = new TextDecoder()
         let buffer = ''
         const feed = (chunk) => {
-          buffer += chunk
-          let i
-          while ((i = buffer.indexOf('\n\n')) >= 0) {
-            this._consumeSse(buffer.slice(0, i).replace(/\r/g, ''))
-            buffer = buffer.slice(i + 2)
+          buffer += chunk.replace(/\r/g, '')   // before splitting, so \r\n\r\n also ends an event
+          for (let i; (i = buffer.indexOf('\n\n')) >= 0; buffer = buffer.slice(i + 2)) {
+            this._consumeSse(buffer.slice(0, i))
           }
         }
-        if (reader) {
-          for (;;) {
-            const { done, value } = await reader.read()
-            if (done) break
-            feed(dec.decode(value, { stream: true }))
-          }
-          if (buffer) this._consumeSse(buffer.replace(/\r/g, ''))
+        if (resp.body && typeof resp.body.getReader === 'function') {
+          const reader = resp.body.getReader()
+          for (let r; !(r = await reader.read()).done;) feed(dec.decode(r.value, { stream: true }))
+          if (buffer) this._consumeSse(buffer)
         } else {
-          // some mini-app runtimes buffer the whole body instead of streaming
-          feed(await resp.text())
+          feed(await resp.text())   // some mini-app runtimes buffer the whole body instead of streaming
         }
         if (!this._answer) throw new Error('未收到回复（桥返回空）')
         await this._flushAnswer()
         this._botId = null
         return true
       } catch (e) {
-        if (attempts < 2 && e && e.name !== 'AbortError' && !this._stopped) {
+        if (attempt < 2 && e && e.name !== 'AbortError' && !this._stopped) {
           // transient network timeout — retry once, from a clean answer line
           this._answer = ''
           await this._patchTurn(botId, { text: '', pending: true })
-          await this._delay(500)
+          await new Promise((r) => setTimeout(r, 500))
           continue
         }
-        const msg = (e && e.name === 'AbortError')
-          ? '（已停止）'
-          : ('（' + (e && e.message || e) + '）')
+        const msg = (e && e.name === 'AbortError') ? '（已停止）' : ('（' + (e && e.message || e) + '）')
         this._botId = null
         await this._patchTurn(botId, { text: (this._answer ? this._answer + '\n' : '') + msg, pending: false })
         this._setStatus('ready')
@@ -110,27 +90,35 @@ export default {
     return false
   },
 
-  // stop the current in-flight request + conversation loop
-  stop() {
+  // stop the in-flight request, recognizer, speech and scrolling
+  _teardown() {
     this._stopped = true
-    if (this._rec) { try { this._rec.abort() } catch (_) {} this._rec = null }
+    this._dropRec('abort')
     if (this._abort) this._abort.abort()
+    this._stopSpeaking(false)
     this._stopReadScroll()
     this._busy = false
+  },
+
+  // stop the current in-flight request + conversation loop
+  stop() {
+    this._teardown()
     this._draftId = null
-    this._setStatus('ready', { inConversation: false, drafting: false })
+    this._setStatus('ready', { inConversation: false })
+  },
+
+  onUnload() {
+    this._teardown()
   },
 
   // parse one SSE block:  data:{...answer_stream...}
   _consumeSse(block) {
-    if (!block) return
-    const m = block.match(/data:\s*(\{.*\})/s)
+    const m = block && block.match(/data:\s*(\{.*\})/s)
     if (!m) return
     try {
       const obj = JSON.parse(m[1])
       if (obj && obj.type === 'answer' && obj.answer_stream) {
-        const cur = this._answer + obj.answer_stream
-        this._answer = cur.length > MAX_ANSWER ? cur.slice(cur.length - MAX_ANSWER) : cur
+        this._answer = (this._answer + obj.answer_stream).slice(-MAX_ANSWER)
         this._renderAnswer()
       }
     } catch (e) { /* ignore */ }
@@ -152,23 +140,19 @@ export default {
 
   // ---- dialog lines ----
   _nextId() {
-    this._seq = (this._seq || 0) + 1
-    return 't' + this._seq
+    return 't' + (this._seq = (this._seq || 0) + 1)
   },
 
   // setData as a promise (with a safety timeout in case the callback never fires)
   _set(data) {
     return new Promise((resolve) => {
-      let done = false
-      const finish = () => { if (!done) { done = true; resolve() } }
-      this.setData(data, finish)
-      setTimeout(finish, 300)
+      this.setData(data, resolve)
+      setTimeout(resolve, 300)
     })
   },
 
   _patchTurn(id, patch) {
-    const turns = this.data.turns.map((t) => (t.id === id ? Object.assign({}, t, patch) : t))
-    return this._set({ turns })
+    return this._set({ turns: this.data.turns.map((t) => (t.id === id ? Object.assign({}, t, patch) : t)) })
   },
 
   // start a new question line below the current dialog (draft = live interim text)
@@ -182,8 +166,9 @@ export default {
         await this._set({ turns })
       }
       // where this Q&A starts: streaming/reading never scrolls the question off the top
+      this._stopReadScroll()   // a new question ends the previous answer's reading scroll
       this._turnStart = turns.length ? this._contentHeight() : 0
-      await this._set({ turns: turns.concat([{ id, role: 'user', text }]), drafting: !!draft })
+      await this._set({ turns: turns.concat([{ id, role: 'user', text }]) })
       this._follow()
     })()
     if (draft) this._draftReady = ready
@@ -192,28 +177,19 @@ export default {
 
   // the final transcript: settle the live draft line, or add the question line now
   async _commitUserTurn(text) {
-    if (this._draftId) {
-      const id = this._draftId
-      await this._draftReady
-      this._draftId = null
-      this._draftReady = null
-      await this._patchTurn(id, { text })
-      this.setData({ drafting: false })
-    } else {
-      await this._openUserTurn(text, false)
-    }
+    if (!this._draftId) return this._openUserTurn(text, false)
+    const id = this._draftId
+    await this._draftReady
+    this._draftId = this._draftReady = null
+    await this._patchTurn(id, { text })
   },
 
   // print the question as it is being recognized
   _onInterim(text) {
-    if (this._busy) return
     const t = (text || '').trim()
-    if (!t) return
-    if (this._draftId) {
-      this._patchTurn(this._draftId, { text: t }).then(() => this._follow())
-    } else {
-      this._openUserTurn(t, true)
-    }
+    if (this._busy || !t) return
+    if (this._draftId) this._patchTurn(this._draftId, { text: t }).then(() => this._follow())
+    else this._openUserTurn(t, true)
   },
 
   // ---- scrolling ----
@@ -259,8 +235,7 @@ export default {
       return
     }
     // scroll-top only reacts when the bound value changes
-    if (top === this.data.scrollTop) top += 1
-    this.setData({ scrollTop: top })
+    this.setData({ scrollTop: top === this.data.scrollTop ? top + 1 : top })
   },
 
   // height of the dialog content (the #log view, else the scroll-view's content)
@@ -277,7 +252,7 @@ export default {
   _follow() {
     if (this._reading) return
     const m = this._metrics()
-    if (!m) { this._scrollTo(1); return }   // size unknown yet: a 1px nudge reports it via bindscroll
+    if (!m) return this._scrollTo(1)   // size unknown yet: a 1px nudge reports it via bindscroll
     let top = this._maxTop(m)
     if (this._turnStart != null) top = Math.min(top, this._turnStart)
     if (top > m.top + 1) this._scrollTo(top, true)
@@ -292,19 +267,17 @@ export default {
   _scrollPage(dir) {
     this._stopReadScroll()
     const m = this._metrics()
-    const step = m && m.client > 0 ? m.client * 0.6 : 150
-    const cur = m ? m.top : (this.data.scrollTop > 100000 ? 0 : this.data.scrollTop)
-    let top = cur + dir * step
-    if (m) top = Math.min(top, this._maxTop(m))
-    this._scrollTo(top, true)
+    if (!m) return this._scrollTo((this.data.scrollTop > 100000 ? 0 : this.data.scrollTop) + dir * 150, true)
+    const step = m.client > 0 ? m.client * 0.6 : 150
+    this._scrollTo(Math.min(m.top + dir * step, this._maxTop(m)), true)
   },
 
   // slowly scroll the answer while it is read, keeping the spoken part ~1/3 down the screen
   _startReadScroll(durationMs) {
     this._stopReadScroll()
     const m0 = this._metrics()
-    if (!m0 || this._turnStart == null || durationMs <= 0) return
     const start = this._turnStart
+    if (!m0 || start == null || durationMs <= 0) return
     if (m0.live && this._contentHeight() - start <= m0.client) return   // fits on one screen
     if (!m0.live) this._scrollTo(m0.top + 1)   // 1px nudge: the scroll event reports the final size
     this._reading = true
@@ -313,129 +286,192 @@ export default {
       try {
         const m = this._metrics()
         if (!m) return
-        const p = Math.min(1, (Date.now() - t0) / durationMs)
+        // real subtitle position when available, else elapsed time vs estimate
+        const p = Math.min(1, this._ttsProgress != null ? this._ttsProgress : (Date.now() - t0) / durationMs)
         const spokenY = start + p * (this._contentHeight() - start)
         const top = Math.min(Math.max(0, m.height - m.client), spokenY - m.client * 0.35)
         if (top > m.top + 0.5) this._scrollTo(top, false)
-        if (p >= 1) this._stopReadScroll()
+        if (p >= 1 && this._ttsProgress == null) this._stopReadScroll()
       } catch (_) { this._stopReadScroll() }
     }, 100)
   },
 
   _stopReadScroll() {
-    if (this._readTimer) { clearInterval(this._readTimer); this._readTimer = null }
+    clearInterval(this._readTimer)
+    this._readTimer = null
     this._reading = false
   },
 
   // ---- continuous voice conversation (one tap, mic stays hot, no per-turn tap) ----
+  // temple tap: while reading = stop reading and listen now; otherwise (re)start
+  // listening. A tap is a user gesture, so the mic is always allowed to open here.
   captureAndAsk() {
-    this._startListening()
+    if (this._tts) {
+      this._stopSpeaking()
+      this._busy = false
+    }
+    if (!this._busy) this._startListening(true)   // still thinking: ignore
   },
 
-  _startListening() {
-    if (this._rec) { if (!this._busy) this._setStatus('listening'); return }
-    if (typeof SpeechRecognition === 'undefined') { this._setStatus('ready'); return }
+  _dropRec(method) {
+    const rec = this._rec
+    this._rec = null
+    if (rec) { try { rec[method]() } catch (_) {} }
+  },
+
+  // fresh = drop the current recognizer first (it may have died without onend)
+  _startListening(fresh) {
+    if (this._rec && !fresh) { if (!this._busy) this._setStatus('listening'); return }
+    this._dropRec('abort')
+    if (typeof SpeechRecognition === 'undefined') return this._setStatus('ready')
     this._stopped = false
-    this._setStatus('listening', { inConversation: true })
-    const rec = new SpeechRecognition()
-    this._rec = rec
+    if (this._draftId) {   // a restart drops the half-recognized question line
+      const id = this._draftId
+      this._draftId = this._draftReady = null
+      this.setData({ turns: this.data.turns.filter((t) => t.id !== id) })
+    }
+    if (!this._busy) this._setStatus('listening', { inConversation: true })
+    const rec = (this._rec = new SpeechRecognition())
     rec.lang = this._asrLang || BRIDGE_CONFIG.lang
     rec.continuous = true
     rec.interimResults = true
     rec.onresult = (e) => {
-      const results = e.results
-      if (!results) return
+      if (this._rec !== rec) return                    // a replaced recognizer
+      if (Date.now() < (this._muteUntil || 0)) return  // tail of our own TTS
+      const results = e.results || []
       let interim = ''
       for (let i = e.resultIndex; i < results.length; i++) {
-        const r = results[i]
-        const t = r && r[0] && r[0].transcript
+        const t = results[i] && results[i][0] && results[i][0].transcript
         if (!t) continue
-        if (r.isFinal) this._handleUtterance(t)
+        if (results[i].isFinal) this._handleUtterance(t)
         else interim += t
       }
       if (interim) this._onInterim(interim)
     }
-    rec.onerror = () => {}
-    rec.onend = () => { this._rec = null }
-    try {
-      rec.start()
-    } catch (e) {
+    // the recognizer stopped (error / silence timeout): don't keep showing LISTENING
+    const ended = () => {
+      if (this._rec !== rec) return
       this._rec = null
-      this._setStatus('ready')
+      if (!this._busy) this._setStatus('ready')
     }
+    rec.onerror = rec.onend = ended
+    try { rec.start() } catch (e) { ended() }
+  },
+
+  // after an answer: keep listening if the recognizer is alive, else try to reopen it
+  _resumeListening() {
+    this._muteUntil = Date.now() + 700
+    if (this._rec) return this._setStatus('listening')
+    if (this._stopped || !this.data.inConversation) return this._setStatus('ready')
+    this._startListening(false)   // may be refused without a gesture -> READY, tap to talk
   },
 
   async _handleUtterance(text) {
-    if (this._busy) return
     const t = (text || '').trim()
-    if (!t) return
+    if (this._busy || !t) return
     this._busy = true
     await this._commitUserTurn(t)
-    if (this._isExit(t)) { this._endConversation(); this._busy = false; return }
+    if (this._isExit(t)) { this._endConversation(); return }
     const ok = await this.ask(t)
     const ans = this._answer
     if (!ok || !ans) {
       // FAILED (error already shown by ask) — stop listening, keep the error visible
       this._busy = false
-      if (this._rec) { try { this._rec.stop() } catch (_) {} this._rec = null }
-      this._setStatus('ready', { inConversation: false })
-      return
+      this._dropRec('stop')
+      return this._setStatus('ready', { inConversation: false })
     }
     const zh = this._isChinese(ans)
     if (BRIDGE_CONFIG.readAloud !== false) {
-      // mic IGNORED while reading aloud (avoid capturing the TTS echo)
+      // mic results IGNORED while reading aloud (avoid capturing the TTS echo)
       this._setStatus('speaking')
-      await this._speak(ans, zh)
+      const interrupted = await this._speak(ans, zh)
       this._stopReadScroll()
+      this._turnStart = null
+      if (interrupted) return   // the tap already switched to listening
       this._scrollToEnd()
     } else {
       this._startReadScroll(this._estimateSpeechMs(ans, zh) * 0.7)
+      this._turnStart = null
     }
-    this._turnStart = null
-    // after reading, resume listening (or you can tap the temple anytime)
     this._busy = false
-    if (this._rec) { this._setStatus('listening') }
-    else { this._setStatus('ready', { inConversation: false }) }
+    this._resumeListening()
   },
 
-  // the TTS voice follows the language of the answer, not the system language
-  // (AIUI ignores utterance.lang today; only the voice id selects the language)
+  // Read the answer aloud. Resolves true if interrupted by a tap, false when done.
+  // The voice follows the language of the answer, not the system language
+  // (AIUI ignores utterance.lang; only the voice id selects the language).
+  // Prefers synthesize() + SpeechAudioPlayer: it can be stopped, reports when
+  // playback really ends, and gives subtitle positions to pace the scrolling.
+  // speak() has no stop and its end event may never fire, so it is the fallback.
   _speak(text, zh) {
     const est = this._estimateSpeechMs(text, zh)
-    this._startReadScroll(est)
+    const voices = BRIDGE_CONFIG.ttsVoices || {}
+    this._ttsProgress = null
     return new Promise((resolve) => {
-      let done = false
-      const finish = () => { if (!done) { done = true; clearTimeout(timer); resolve() } }
-      const timer = setTimeout(finish, Math.min(300000, est * 1.2 + 1500))  // fallback
-      try {
-        if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
-          const u = new SpeechSynthesisUtterance(text)
-          const voices = BRIDGE_CONFIG.ttsVoices || {}
-          u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
-          u.lang = zh ? 'zh-CN' : 'en-US'
-          u.onend = finish
-          u.onerror = finish
-          speechSynthesis.speak(u)
-        } else { finish() }
-      } catch (e) { finish() }
+      let timer = null
+      const tts = {
+        finish: (interrupted) => {
+          if (this._tts !== tts) return
+          this._tts = this._ttsProgress = null
+          clearTimeout(timer)
+          resolve(!!interrupted)
+        },
+      }
+      this._tts = tts
+      if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') return tts.finish(false)
+      const arm = (ms) => { clearTimeout(timer); timer = setTimeout(() => this._stopSpeaking(false), Math.min(300000, ms)) }
+      const u = new SpeechSynthesisUtterance(text)
+      u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
+      u.lang = zh ? 'zh-CN' : 'en-US'
+      const speakSimple = () => {
+        if (this._tts !== tts) return
+        arm(est * 1.1 + 1000)
+        u.onend = u.onerror = () => tts.finish(false)
+        this._startReadScroll(est)
+        try { speechSynthesis.speak(u) } catch (_) { tts.finish(false) }
+      }
+      if (typeof speechSynthesis.synthesize !== 'function' || typeof SpeechAudioPlayer === 'undefined') return speakSimple()
+      arm(est * 1.5 + 8000)   // safety net only; onEnded normally ends it
+      speechSynthesis.synthesize(u, { subtitles: 'sentence' }).then((task) => {
+        if (this._tts !== tts) { try { task.abort() } catch (_) {} return }
+        const player = (tts.player = new SpeechAudioPlayer(task, { trackMode: 'hidden' }))
+        tts.task = task
+        player.audioPlayer.onCanplay(() => { if (this._tts === tts) { try { player.play() } catch (_) {} } })
+        player.audioPlayer.onEnded(() => tts.finish(false))
+        task.onerror = () => tts.finish(false)
+        player.textTrack.addEventListener('cuechange', () => {
+          const cue = player.textTrack.activeCues.item(0)
+          if (cue && Number.isInteger(cue.charIndex)) {
+            this._ttsProgress = (cue.charIndex + (cue.charLength || 0) / 2) / Math.max(1, text.length)
+          }
+        })
+        this._startReadScroll(est)
+      }).catch(speakSimple)
     })
+  },
+
+  // stop reading aloud now (interrupted = true when the user tapped)
+  _stopSpeaking(interrupted = true) {
+    const tts = this._tts
+    if (!tts) return
+    try { if (tts.player) tts.player.stop() } catch (_) {}
+    try { if (tts.task && tts.task.state === 'running') tts.task.abort() } catch (_) {}
+    try { if (tts.player) tts.player.destroy() } catch (_) {}
+    try { if (!tts.player && typeof speechSynthesis.cancel === 'function') speechSynthesis.cancel() } catch (_) {}
+    this._stopReadScroll()
+    tts.finish(interrupted)
   },
 
   // Chinese if Han characters make up a meaningful share of the text
   // (one Han char ~ half an English word, so a few English terms don't flip it)
   _isChinese(text) {
-    const s = text || ''
-    const han = (s.match(/[㐀-鿿豈-﫿]/g) || []).length
-    const words = (s.match(/[A-Za-z]+/g) || []).length
-    return han > 0 && han * 2 >= words
+    const han = count(text, HAN)
+    return han > 0 && han * 2 >= count(text, /[A-Za-z]+/g)
   },
 
   // rough speaking time: ~4 Han chars/s, ~160 English words/min
   _estimateSpeechMs(text, zh) {
-    const s = text || ''
-    const han = (s.match(/[㐀-鿿豈-﫿]/g) || []).length
-    const words = (s.match(/[A-Za-z0-9]+/g) || []).length
-    return 800 + han * 240 + words * (zh ? 450 : 380)
+    return 800 + count(text, HAN) * 240 + count(text, /[A-Za-z0-9]+/g) * (zh ? 450 : 380)
   },
 
   _isExit(text) {
@@ -443,26 +479,24 @@ export default {
   },
 
   _endConversation() {
-    if (this._rec) { try { this._rec.stop() } catch (_) {} this._rec = null }
+    this._dropRec('stop')
     this._busy = false
     this._turnStart = null
-    const ended = (this.data.strings && this.data.strings.ended) || '（会话已结束）'
     this._setStatus('ready', {
       inConversation: false,
-      turns: this.data.turns.concat([{ id: this._nextId(), role: 'note', text: ended }]),
+      turns: this.data.turns.concat([{ id: this._nextId(), role: 'note', text: this.data.strings.ended || '（会话已结束）' }]),
     })
     setTimeout(() => this._follow(), 50)
   },
 
   _setStatus(status, extra) {
     const s = this.data.strings || {}
-    const chip = { listening: s.chipListening, working: s.chipThinking, speaking: s.chipSpeaking }[status] || s.chipReady
-    const hint = { listening: s.hintListening, working: s.hintWorking, speaking: s.hintSpeaking }[status] || s.hintIdle
-    this.setData(Object.assign({ status, chip, hint }, extra || {}))
-  },
-
-  _delay(ms) {
-    return new Promise((r) => setTimeout(r, ms))
+    const [chip, hint] = {
+      listening: [s.chipListening, s.hintListening],
+      working: [s.chipThinking, s.hintWorking],
+      speaking: [s.chipSpeaking, s.hintSpeaking],
+    }[status] || [s.chipReady, s.hintIdle]
+    this.setData(Object.assign({ status, chip, hint }, extra))
   },
 
   // capture a photo with the AIUI camera API and send it with the query (vision)
@@ -470,10 +504,13 @@ export default {
     let imageDataUrl = ''
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      const track = stream.getVideoTracks()[0]
-      const capture = new ImageCapture(track)
-      const blob = await capture.takePhoto({ mode: 'default' })
-      imageDataUrl = await this._blobToDataUrl(blob)
+      const blob = await new ImageCapture(stream.getVideoTracks()[0]).takePhoto({ mode: 'default' })
+      imageDataUrl = await new Promise((resolve) => {
+        const fr = new FileReader()
+        fr.onload = () => resolve(fr.result)
+        fr.onerror = () => resolve('')
+        fr.readAsDataURL(blob)
+      })
       stream.getTracks().forEach(t => t.stop())
     } catch (e) {
       // no camera / permission denied — fall back to text only
@@ -483,31 +520,17 @@ export default {
     await this.ask(q, imageDataUrl || undefined)
   },
 
-  _blobToDataUrl(blob) {
-    return new Promise((resolve) => {
-      const fr = new FileReader()
-      fr.onload = () => resolve(fr.result)
-      fr.onerror = () => resolve('')
-      fr.readAsDataURL(blob)
-    })
-  },
-
   onKeyUp(event) {
-    if (event.code === 'Backspace' || event.code === 'Escape') {
-      this.stop()
-      return
-    }
+    const code = event.code
+    if (code === 'Backspace' || code === 'Escape') return this.stop()
     // temple tap (GlobalHook) or Enter = start talking (valid user gesture
     // so SpeechRecognition is allowed to open the mic)
-    if (event.code === 'GlobalHook' || event.code === 'Enter') {
-      this.captureAndAsk()
-      return
-    }
+    if (code === 'GlobalHook' || code === 'Enter') return this.captureAndAsk()
     // temple swipe: the default only scrolls the (fixed) root view, so take it over
     // and scroll the dialog instead (also pauses the reading auto-scroll)
-    if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+    if (code === 'ArrowUp' || code === 'ArrowDown') {
       if (event.preventDefault) event.preventDefault()
-      this._scrollPage(event.code === 'ArrowUp' ? -1 : 1)
+      this._scrollPage(code === 'ArrowUp' ? -1 : 1)
     }
   },
 
@@ -517,17 +540,17 @@ export default {
     this._asrLang = (BRIDGE_CONFIG.lang && BRIDGE_CONFIG.lang !== 'auto')
       ? BRIDGE_CONFIG.lang
       : (typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US')
-    this.setData({ strings: this._strings(this._asrLang) })
-    this.setData({ showTalkButton: BRIDGE_CONFIG.showTalkButton === true })
-    this.setData({ scrollH: this._scrollHeightPx() })
+    this.setData({
+      strings: this._strings(this._asrLang),
+      showTalkButton: BRIDGE_CONFIG.showTalkButton === true,
+      scrollH: this._scrollHeightPx(),
+    })
     this._setStatus('ready')
     // semantic wake-up: "Hi Rokid, open the xxx agent" may pass the spoken query.
     // AIUI SpeechRecognition requires a user gesture (interactive), so do NOT
     // auto-start ASR on load; the user taps the temple to talk.
     const q = query && (query.text || query.query || query.q)
-    if (q && typeof q === 'string' && q.trim()) {
-      this._handleUtterance(q.trim())
-    }
+    if (q && typeof q === 'string' && q.trim()) this._handleUtterance(q.trim())
   },
 
   // the scroll-view needs a definite pixel height to overflow (a flex/100% height
@@ -542,28 +565,19 @@ export default {
 
   // UI strings by language; zh for zh-*, otherwise English
   _strings(lang) {
-    const zh = /^zh/i.test(lang || '')
-    return zh ? {
+    return /^zh/i.test(lang || '') ? {
       chipReady: '就绪', chipListening: '聆听中', chipThinking: '思考中', chipSpeaking: '播报中',
       idle: '轻按眼镜腿开始对话', say: '请讲…', thinking: '正在思考…',
       talk: '说话', hintIdle: '眼镜腿 tap = 开始 · 说「退出」结束',
-      hintListening: '正在听 · 说完即可', hintWorking: '请稍候', hintSpeaking: '正在朗读',
+      hintListening: '正在听 · 说完即可', hintWorking: '请稍候', hintSpeaking: '眼镜腿 tap = 打断并提问',
       ended: '（会话已结束）',
     } : {
       chipReady: 'READY', chipListening: 'LISTENING', chipThinking: 'THINKING', chipSpeaking: 'SPEAKING',
       idle: 'Tap the temple to start', say: 'Your turn…', thinking: 'Thinking…',
       talk: 'Talk', hintIdle: 'temple tap = start · say "exit" to stop',
-      hintListening: 'listening · just speak', hintWorking: 'one moment', hintSpeaking: 'reading aloud',
+      hintListening: 'listening · just speak', hintWorking: 'one moment', hintSpeaking: 'temple tap = interrupt & ask',
       ended: '(conversation ended)',
     }
-  },
-
-  onUnload() {
-    this._stopped = true
-    if (this._rec) { try { this._rec.abort() } catch (_) {} this._rec = null }
-    if (this._abort) this._abort.abort()
-    this._stopReadScroll()
-    this._busy = false
   },
 }
 </script>
@@ -577,7 +591,7 @@ export default {
         <text class="chip">{{ chip }}</text>
       </view>
     </view>
-    <view class="body" style="height: {{ scrollH }}px;">
+    <view class="body">
       <scroll-view id="chat" class="scroll" style="height: {{ scrollH }}px;" scroll-y="true" show-scrollbar="true" scroll-top="{{ scrollTop }}" bindscroll="onChatScroll">
         <view id="log" class="log">
           <text class="line idle" ink:if="{{ !turns.length }}">{{ status === 'listening' ? strings.say : strings.idle }}</text>
@@ -595,130 +609,27 @@ export default {
 </page>
 
 <style>
-.app {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  padding: 12px 16px;
-  box-sizing: border-box;
-  overflow: hidden;
-}
-.head {
-  display: flex;
-  height: 28px;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: space-between;
-  width: 100%;
-}
-.brand {
-  color: #40FF5E;
-  font-size: 18px;
-  font-weight: bold;
-  letter-spacing: 1px;
-}
-.state {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-}
-.chip {
-  color: #123a1d;
-  background: #40FF5E;
-  border-radius: 999px;
-  padding: 3px 10px;
-  font-size: 12px;
-  font-weight: bold;
-  letter-spacing: 1px;
-}
-.body {
-  width: 100%;
-  height: 266px;
-  flex-shrink: 0;
-  margin-top: 8px;
-  overflow: hidden;
-}
-.scroll {
-  width: 100%;
-  height: 266px;
-}
-.scroll::-webkit-scrollbar {
-  width: 3px;
-  background-color: transparent;
-}
-.scroll::-webkit-scrollbar-thumb {
-  background-color: rgba(64,255,94,0.48);
-  border-radius: 2px;
-}
-.log {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  padding-right: 8px;
-  padding-bottom: 12px;
-  box-sizing: border-box;
-}
-.turn {
-  width: 100%;
-  margin-bottom: 8px;
-}
-.dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #40FF5E;
-  margin-right: 8px;
-  flex: 0 0 auto;
-  animation: pulse 1.1s ease-in-out infinite;
-}
-.line {
-  width: 100%;
-  text-align: left;
-  font-size: 20px;
-  line-height: 30px;
-  white-space: pre-wrap;
-}
-.bot {
-  color: #40FF5E;
-}
-.user,
-.note,
-.idle,
-.pending {
-  color: rgba(64,255,94,0.48);
-}
-.foot {
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  align-items: center;
-  margin-top: 8px;
-}
-.talk {
-  margin-bottom: 8px;
-  color: #40FF5E;
-  border: 1px solid #40ff5d55;
-  border-radius: 999px;
-  padding: 8px 26px;
-  font-size: 16px;
-  line-height: 20px;
-  text-align: center;
-  transition: all .2s;
-}
-.talk.listening {
-  border: 2px solid #40FF5E;
-  animation: pulse 1.1s ease-in-out infinite;
-}
-.talk.working {
-  border: 1px dashed #40FF5E;
-  opacity: .8;
-}
+.app { display: flex; flex-direction: column; height: 100vh; padding: 12px 16px; box-sizing: border-box; overflow: hidden; }
+.head { display: flex; height: 28px; flex-shrink: 0; align-items: center; justify-content: space-between; width: 100%; }
+.brand { color: #40FF5E; font-size: 18px; font-weight: bold; letter-spacing: 1px; }
+.state { display: flex; flex-direction: row; align-items: center; }
+.chip { color: #123a1d; background: #40FF5E; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: bold; letter-spacing: 1px; }
+.body { width: 100%; flex-shrink: 0; margin-top: 8px; overflow: hidden; }
+.scroll { width: 100%; height: 266px; }
+.scroll::-webkit-scrollbar { width: 3px; background-color: transparent; }
+.scroll::-webkit-scrollbar-thumb { background-color: rgba(64,255,94,0.48); border-radius: 2px; }
+.log { display: flex; flex-direction: column; width: 100%; padding-right: 8px; padding-bottom: 12px; box-sizing: border-box; }
+.turn { width: 100%; margin-bottom: 8px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #40FF5E; margin-right: 8px; flex: 0 0 auto; animation: pulse 1.1s ease-in-out infinite; }
+.line { width: 100%; text-align: left; font-size: 20px; line-height: 30px; white-space: pre-wrap; }
+.bot { color: #40FF5E; }
+.user, .note, .idle, .pending { color: rgba(64,255,94,0.48); }
+.foot { display: flex; flex-direction: column; flex-shrink: 0; align-items: center; margin-top: 8px; }
+.talk { margin-bottom: 8px; color: #40FF5E; border: 1px solid #40ff5d55; border-radius: 999px; padding: 8px 26px; font-size: 16px; line-height: 20px; text-align: center; transition: all .2s; }
+.talk.listening { border: 2px solid #40FF5E; animation: pulse 1.1s ease-in-out infinite; }
+.talk.working { border: 1px dashed #40FF5E; opacity: .8; }
 .hidden { display: none; }
-.hint {
-  color: #2aa046;
-  font-size: 13px;
-  line-height: 18px;
-}
+.hint { color: #2aa046; font-size: 13px; line-height: 18px; }
 @keyframes pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(64,255,94,.5); }
   50% { box-shadow: 0 0 0 8px rgba(64,255,94,0); }

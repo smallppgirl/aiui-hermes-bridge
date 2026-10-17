@@ -30,18 +30,17 @@ export const BRIDGE_CONFIG = {
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.
+// AIUI captures photos as a base64 data URL; the bridge's image transport may
+// expect its own field/shape (see README) — adjust for your bridge.
 export function buildPayload(text, imageDataUrl) {
-  const message = [{ role: "user", type: "text", text }]
-  if (imageDataUrl) {
-    // AIUI captures photos as a base64 data URL. Bridge image transport may
-    // expect its own field/shape (see README) — adjust for your bridge.
-    message.push({ role: "user", type: "image_url", image_url: { url: imageDataUrl } })
-  }
   return {
     message_id: "aiui-" + Date.now(),
     agent_id: BRIDGE_CONFIG.agentId,
     user_id: BRIDGE_CONFIG.userId,
-    message,
+    message: [
+      { role: "user", type: "text", text },
+      ...(imageDataUrl ? [{ role: "user", type: "image_url", image_url: { url: imageDataUrl } }] : []),
+    ],
     metadata: { context: { language: BRIDGE_CONFIG.lang } },
   };
 }

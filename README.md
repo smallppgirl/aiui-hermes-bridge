@@ -28,6 +28,11 @@ bridge over SSE and renders the streamed answer on the glasses HUD.
 3. Upload to your Rokid Glasses, set the required permissions (network, mic, camera, display),
    and test on-device.
 
+## Tests
+`npm test` (Node 20+) runs the page logic against fakes of the AIUI runtime
+(speech recognition, TTS, SSE fetch, scroll-view) — no glasses, bridge or real AK needed.
+`test/` is excluded from the `.aix` package via `.aixignore`.
+
 ## Notes
 - The bridges accept the Rokid/lingzhu-style body; extra fields are ignored. `take_photo` tool_calls
   are emitted by the bridge for vision intents, but an AIUI agent drives its own camera (see #3).

@@ -15,6 +15,7 @@ export default {
     inConversation: false,
     strings: {},            // set in onLoad from the system language
     showTalkButton: false,  // from config
+    scrollTop: 0,           // for the answer scroll-view
   },
 
   // ---- call the Hermes/Claude bridge and render the answer ----
@@ -104,7 +105,7 @@ export default {
       if (obj && obj.type === 'answer' && obj.answer_stream) {
         const cur = this.data.answerText + obj.answer_stream
         // cap displayed text to avoid unbounded growth on very long answers
-        this.setData({ answerText: cur.length > 4000 ? cur.slice(cur.length - 4000) : cur })
+        this.setData({ answerText: cur.length > 4000 ? cur.slice(cur.length - 4000) : cur, scrollTop: 99999 })
       }
       if (obj && obj.is_finish) {
         this.setData({ status: 'done' })
@@ -153,30 +154,28 @@ export default {
     const t = (text || '').trim()
     if (!t) { this._busy = false; return }
     if (this._isExit(t)) { this._endConversation(); this._busy = false; return }
-    this.ask(t).then(async () => {
+    this.ask(t).then(() => {
       const ans = this.data.answerText
-      if (BRIDGE_CONFIG.readAloud !== false && ans) {
-        // keep mic ignored (busy) while reading aloud, so TTS isn't captured
-        await this._speakAsync(ans)
-      }
+      // mic stays ACTIVE while reading aloud (test whether TTS echo is actually a problem)
       this._busy = false
       if (this._rec) { this.setData({ status: 'listening' }) }
       else { this.setData({ status: 'ready', inConversation: false }) }
+      if (BRIDGE_CONFIG.readAloud !== false && ans) {
+        setTimeout(() => this._speak(ans), 300)  // read aloud, fire-and-forget
+      }
     })
   },
 
-  _speakAsync(text) {
-    return new Promise((resolve) => {
-      try {
-        if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
-          const u = new SpeechSynthesisUtterance(text)
-          u.onend = () => resolve()
-          u.onerror = () => resolve()
-          speechSynthesis.speak(u)
-          setTimeout(resolve, Math.min(60000, 1000 + text.length * 80))  // fallback
-        } else { resolve() }
-      } catch (e) { resolve() }
-    })
+  _speak(text) {
+    try {
+      if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
+        const u = new SpeechSynthesisUtterance(text)
+        const zh = this._asrLang && /^zh/i.test(this._asrLang)
+        // pick a native voice for the language so it doesn't sound like a foreigner
+        u.voice = zh ? 'Chinese (Mandarin)_News_Anchor' : 'English_radiant_girl'
+        speechSynthesis.speak(u)
+      }
+    } catch (e) {}
   },
 
   _isExit(text) {
@@ -284,8 +283,10 @@ export default {
       <text class="chip">{{ status === 'listening' ? strings.chipListening : status === 'working' ? strings.chipThinking : strings.chipReady }}</text>
     </view>
     <view class="body">
-      <view class="{{ status === 'listening' ? 'dot' : 'hidden' }}"></view>
-      <text class="answer">{{ answerText || (status === 'listening' ? strings.say : status === 'working' ? strings.working : strings.idle) }}</text>
+      <scroll-view class="scroll" scroll-y scroll-top="{{ scrollTop }}">
+        <view class="{{ status === 'listening' ? 'dot' : 'hidden' }}"></view>
+        <text class="answer">{{ answerText || (status === 'listening' ? strings.say : status === 'working' ? strings.working : strings.idle) }}</text>
+      </scroll-view>
     </view>
     <view class="foot">
       <button class="talk {{ showTalkButton ? '' : 'hidden' }} {{ status === 'listening' ? 'listening' : status === 'working' ? 'working' : '' }}" bindtap="captureAndAsk">{{ strings.talk }}</button>
@@ -327,7 +328,12 @@ export default {
 .body {
   flex: 1;
   display: flex;
-  align-items: center;
+  align-items: stretch;
+  overflow: hidden;
+}
+.scroll {
+  flex: 1;
+  height: 100%;
 }
 .dot {
   width: 12px;

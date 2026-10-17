@@ -161,7 +161,7 @@ export default {
     const t = (text || '').trim()
     if (!t) { this._busy = false; return }
     if (this._isExit(t)) { this._endConversation(); this._busy = false; return }
-    this.ask(t).then((ok) => {
+    this.ask(t).then(async (ok) => {
       const ans = this.data.answerText
       if (!ok || !ans) {
         // FAILED (error already shown by ask) — stop listening, keep the error visible
@@ -170,26 +170,32 @@ export default {
         this.setData({ status: 'ready', inConversation: false })
         return
       }
-      // success — mic stays ACTIVE while reading aloud (test TTS echo)
+      // mic IGNORED while reading aloud (avoid capturing the TTS echo)
+      if (BRIDGE_CONFIG.readAloud !== false && ans) {
+        await this._speak(ans)
+      }
+      // after reading, resume listening (or you can tap the temple anytime)
       this._busy = false
       if (this._rec) { this.setData({ status: 'listening' }) }
       else { this.setData({ status: 'ready', inConversation: false }) }
-      if (BRIDGE_CONFIG.readAloud !== false && ans) {
-        setTimeout(() => this._speak(ans), 300)  // read aloud, fire-and-forget
-      }
     })
   },
 
   _speak(text) {
-    try {
-      if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
-        const u = new SpeechSynthesisUtterance(text)
-        const zh = this._asrLang && /^zh/i.test(this._asrLang)
-        const voices = BRIDGE_CONFIG.ttsVoices || {}
-        u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
-        speechSynthesis.speak(u)
-      }
-    } catch (e) {}
+    return new Promise((resolve) => {
+      try {
+        if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
+          const u = new SpeechSynthesisUtterance(text)
+          const zh = this._asrLang && /^zh/i.test(this._asrLang)
+          const voices = BRIDGE_CONFIG.ttsVoices || {}
+          u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
+          u.onend = () => resolve()
+          u.onerror = () => resolve()
+          speechSynthesis.speak(u)
+          setTimeout(resolve, Math.min(60000, 1000 + text.length * 80))  // fallback
+        } else { resolve() }
+      } catch (e) { resolve() }
+    })
   },
 
   _isExit(text) {

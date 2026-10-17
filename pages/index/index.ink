@@ -21,7 +21,8 @@ export default {
     inConversation: false,
     strings: {},            // set in onLoad from the system language
     showTalkButton: false,  // from config
-    scrollTop: 0,           // fallback for runtimes without the entity scroll API
+    scrollTop: 0,           // scroll-top binding (used when the entity scroll API is missing)
+    scrollH: 266,           // scroll-view height in px, computed in onLoad
   },
 
   // ---- call the Hermes/Claude bridge and stream the answer into a new dialog line ----
@@ -216,8 +217,50 @@ export default {
   },
 
   // ---- scrolling ----
+  // Works on old and new runtimes: the entity scroll API (AIUI >= 0.18) is used when
+  // present, otherwise the scroll-top binding, with positions learned from bindscroll.
+
+  // the scroll-view entity, only if this runtime exposes its scroll metrics
   _chat() {
-    try { return this.querySelector ? this.querySelector('#chat') : null } catch (_) { return null }
+    try {
+      const el = this.querySelector ? this.querySelector('#chat') : null
+      return el && typeof el.scrollHeight === 'number' ? el : null
+    } catch (_) { return null }
+  },
+
+  // { top, height, client, live } — live from the entity, else from the last scroll
+  // event (then height can be stale: content grows without firing scroll events)
+  _metrics() {
+    const el = this._chat()
+    if (el) return { top: el.scrollTop, height: el.scrollHeight, client: el.clientHeight, live: true }
+    const d = this._lastScroll
+    return d ? { top: d.scrollTop, height: d.scrollHeight, client: d.clientHeight, live: false } : null
+  },
+
+  // furthest position we may scroll to (stale height: overshoot, the runtime clamps)
+  _maxTop(m) {
+    return m.live ? Math.max(0, m.height - m.client) : m.top + m.client * 2
+  },
+
+  onChatScroll(e) {
+    const d = e && e.detail
+    if (!d) return
+    this._lastScroll = d
+    this.data.scrollTop = d.scrollTop   // silent sync, so a re-render never jumps back
+  },
+
+  _scrollTo(top, smooth) {
+    top = Math.max(0, Math.round(top))
+    const el = this._chat()
+    if (el && typeof el.scrollTo === 'function') {
+      this.data.scrollTop = top
+      const r = el.scrollTo({ top, behavior: smooth ? 'smooth' : 'instant' })
+      if (r && r.catch) r.catch(() => {})
+      return
+    }
+    // scroll-top only reacts when the bound value changes
+    if (top === this.data.scrollTop) top += 1
+    this.setData({ scrollTop: top })
   },
 
   // height of the dialog content (the #log view, else the scroll-view's content)
@@ -225,56 +268,58 @@ export default {
     try {
       const log = this.querySelector && this.querySelector('#log')
       if (log && log.clientHeight > 0) return log.clientHeight
-      const el = this._chat()
-      return el ? el.scrollHeight : 0
-    } catch (_) { return 0 }
+    } catch (_) {}
+    const m = this._metrics()
+    return m ? m.height : 0
   },
 
   // keep the newest text in view, but never past the start of the current question
   _follow() {
     if (this._reading) return
-    const el = this._chat()
-    if (el && typeof el.scrollTo === 'function') {
-      let top = el.scrollHeight - el.clientHeight
-      if (this._turnStart != null) top = Math.min(top, this._turnStart)
-      if (top > el.scrollTop + 1) {
-        const r = el.scrollTo({ top, behavior: 'smooth' })
-        if (r && r.catch) r.catch(() => {})
-      }
-    } else {
-      // older runtimes: scroll-top only reacts when the bound value changes
-      this._flip = !this._flip
-      this.setData({ scrollTop: this._flip ? 1000000 : 1000001 })
-    }
+    const m = this._metrics()
+    if (!m) { this._scrollTo(1); return }   // size unknown yet: a 1px nudge reports it via bindscroll
+    let top = this._maxTop(m)
+    if (this._turnStart != null) top = Math.min(top, this._turnStart)
+    if (top > m.top + 1) this._scrollTo(top, true)
   },
 
   _scrollToEnd() {
-    const el = this._chat()
-    if (el && typeof el.scrollTo === 'function') {
-      const r = el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-      if (r && r.catch) r.catch(() => {})
-    }
+    const m = this._metrics()
+    this._scrollTo(m ? m.height : 1000000, true)
+  },
+
+  // temple swipe (ArrowUp / ArrowDown): scroll by ~60% of a screen
+  _scrollPage(dir) {
+    this._stopReadScroll()
+    const m = this._metrics()
+    const step = m && m.client > 0 ? m.client * 0.6 : 150
+    const cur = m ? m.top : (this.data.scrollTop > 100000 ? 0 : this.data.scrollTop)
+    let top = cur + dir * step
+    if (m) top = Math.min(top, this._maxTop(m))
+    this._scrollTo(top, true)
   },
 
   // slowly scroll the answer while it is read, keeping the spoken part ~1/3 down the screen
   _startReadScroll(durationMs) {
     this._stopReadScroll()
-    const el = this._chat()
-    if (!el || this._turnStart == null || durationMs <= 0) return
+    const m0 = this._metrics()
+    if (!m0 || this._turnStart == null || durationMs <= 0) return
     const start = this._turnStart
-    const end = this._contentHeight()
-    if (end - start <= el.clientHeight) return   // fits on one screen
+    if (m0.live && this._contentHeight() - start <= m0.client) return   // fits on one screen
+    if (!m0.live) this._scrollTo(m0.top + 1)   // 1px nudge: the scroll event reports the final size
     this._reading = true
     const t0 = Date.now()
     this._readTimer = setInterval(() => {
       try {
+        const m = this._metrics()
+        if (!m) return
         const p = Math.min(1, (Date.now() - t0) / durationMs)
-        const spokenY = start + p * (end - start)
-        const top = Math.min(el.scrollHeight - el.clientHeight, spokenY - el.clientHeight * 0.35)
-        if (top > el.scrollTop + 0.5) el.scrollTop = top
+        const spokenY = start + p * (this._contentHeight() - start)
+        const top = Math.min(Math.max(0, m.height - m.client), spokenY - m.client * 0.35)
+        if (top > m.top + 0.5) this._scrollTo(top, false)
         if (p >= 1) this._stopReadScroll()
       } catch (_) { this._stopReadScroll() }
-    }, 80)
+    }, 100)
   },
 
   _stopReadScroll() {
@@ -458,16 +503,11 @@ export default {
       this.captureAndAsk()
       return
     }
-    // manual scroll through the dialog (pauses the reading auto-scroll)
+    // temple swipe: the default only scrolls the (fixed) root view, so take it over
+    // and scroll the dialog instead (also pauses the reading auto-scroll)
     if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
-      const el = this._chat()
-      if (el && typeof el.scrollBy === 'function') {
-        if (event.preventDefault) event.preventDefault()
-        this._stopReadScroll()
-        const dir = event.code === 'ArrowUp' ? -1 : 1
-        const r = el.scrollBy({ top: dir * el.clientHeight * 0.6, behavior: 'smooth' })
-        if (r && r.catch) r.catch(() => {})
-      }
+      if (event.preventDefault) event.preventDefault()
+      this._scrollPage(event.code === 'ArrowUp' ? -1 : 1)
     }
   },
 
@@ -479,6 +519,7 @@ export default {
       : (typeof navigator !== 'undefined' && navigator.language ? navigator.language : 'en-US')
     this.setData({ strings: this._strings(this._asrLang) })
     this.setData({ showTalkButton: BRIDGE_CONFIG.showTalkButton === true })
+    this.setData({ scrollH: this._scrollHeightPx() })
     this._setStatus('ready')
     // semantic wake-up: "Hi Rokid, open the xxx agent" may pass the spoken query.
     // AIUI SpeechRecognition requires a user gesture (interactive), so do NOT
@@ -487,6 +528,16 @@ export default {
     if (q && typeof q === 'string' && q.trim()) {
       this._handleUtterance(q.trim())
     }
+  },
+
+  // the scroll-view needs a definite pixel height to overflow (a flex/100% height
+  // grows with its content and is just clipped, so nothing can scroll)
+  _scrollHeightPx() {
+    let h = 352   // Rokid Glasses reference canvas height
+    try { if (typeof window !== 'undefined' && window.innerHeight > 0) h = window.innerHeight } catch (_) {}
+    // app padding 12+12, head 28, foot 8+18 (+46 with the Talk button), gap 8
+    const chrome = 86 + (BRIDGE_CONFIG.showTalkButton === true ? 46 : 0)
+    return Math.max(120, Math.floor(h - chrome))
   },
 
   // UI strings by language; zh for zh-*, otherwise English
@@ -526,8 +577,8 @@ export default {
         <text class="chip">{{ chip }}</text>
       </view>
     </view>
-    <view class="body">
-      <scroll-view id="chat" class="scroll" scroll-y="true" scroll-top="{{ scrollTop }}">
+    <view class="body" style="height: {{ scrollH }}px;">
+      <scroll-view id="chat" class="scroll" style="height: {{ scrollH }}px;" scroll-y="true" show-scrollbar="true" scroll-top="{{ scrollTop }}" bindscroll="onChatScroll">
         <view id="log" class="log">
           <text class="line idle" ink:if="{{ !turns.length }}">{{ status === 'listening' ? strings.say : strings.idle }}</text>
           <view class="turn" ink:for="{{ turns }}" ink:key="id">
@@ -547,13 +598,15 @@ export default {
 .app {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
   height: 100vh;
-  padding: 14px 16px 20px;
+  padding: 12px 16px;
   box-sizing: border-box;
+  overflow: hidden;
 }
 .head {
   display: flex;
+  height: 28px;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   width: 100%;
@@ -579,23 +632,31 @@ export default {
   letter-spacing: 1px;
 }
 .body {
-  flex: 1;
-  display: flex;
-  align-items: stretch;
+  width: 100%;
+  height: 266px;
+  flex-shrink: 0;
+  margin-top: 8px;
   overflow: hidden;
-  margin-top: 10px;
 }
 .scroll {
-  flex: 1;
   width: 100%;
-  height: 100%;
-  overflow: hidden;
+  height: 266px;
+}
+.scroll::-webkit-scrollbar {
+  width: 3px;
+  background-color: transparent;
+}
+.scroll::-webkit-scrollbar-thumb {
+  background-color: rgba(64,255,94,0.48);
+  border-radius: 2px;
 }
 .log {
   display: flex;
   flex-direction: column;
   width: 100%;
+  padding-right: 8px;
   padding-bottom: 12px;
+  box-sizing: border-box;
 }
 .turn {
   width: 100%;
@@ -629,9 +690,12 @@ export default {
 .foot {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
   align-items: center;
+  margin-top: 8px;
 }
 .talk {
+  margin-bottom: 8px;
   color: #40FF5E;
   border: 1px solid #40ff5d55;
   border-radius: 999px;
@@ -653,7 +717,7 @@ export default {
 .hint {
   color: #2aa046;
   font-size: 13px;
-  margin-top: 10px;
+  line-height: 18px;
 }
 @keyframes pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(64,255,94,.5); }

@@ -1,4 +1,6 @@
 // AIUI agent config — point these at YOUR bridge
+import { SECRETS } from './secrets.js'
+
 export const BRIDGE_CONFIG = {
   // Hermes (B) bridge:
   url: "https://rokid-hermes.snowbig.com/api/sse",
@@ -6,8 +8,8 @@ export const BRIDGE_CONFIG = {
   // For Claude Code bridge instead use:
   // url: "https://rokid-claude.snowbig.com/rokid/sse",
   // agentId: "claude-agent",
-  // AK = the ROKID_AK / ROKID_AGENT_AK from the bridge .env
-  ak: "REPLACE_WITH_BRIDGE_AK",
+  // AK lives in secrets.js (gitignored) — copy secrets.example.js to create it
+  ak: SECRETS.ak,
   userId: "aiui-rokit",
   // voice recognition language: 'auto' (follow the system / Hi Rokid language),
   // or force e.g. 'zh-CN' / 'en-US'
@@ -19,8 +21,11 @@ export const BRIDGE_CONFIG = {
   // NOTE: with continuous listening this may capture the glasses' own TTS (echo);
   // if that happens, set this to false (text-only, mic stays clean).
   readAloud: true,
-  // TTS voices by language. zh = Chinese female (female-yujie / female-tianmei /
-  // lovely_girl / male variants male-qn-jingying, male-qn-qingse); en = English.
+  // TTS voices by language. The voice is picked from the language of each answer
+  // (Chinese answer -> zh voice, English answer -> en voice), not the system language.
+  // zh = Chinese female (female-yujie / female-tianmei / lovely_girl / male variants
+  // male-qn-jingying, male-qn-qingse); en = English (English_radiant_girl /
+  // English_expressive_narrator / English_Trustworthy_Man).
   ttsVoices: { zh: 'female-yujie', en: 'English_radiant_girl' },
 };
 

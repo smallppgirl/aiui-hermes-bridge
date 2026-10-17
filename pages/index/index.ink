@@ -19,8 +19,9 @@ export default {
   },
 
   // ---- call the Hermes/Claude bridge and render the answer ----
+  // returns true if an answer was received and rendered, false otherwise.
   async ask(text, imageDataUrl) {
-    if (!text && !imageDataUrl) return
+    if (!text && !imageDataUrl) return false
     this.setData({ status: 'working', answerText: '' })
     let attempts = 0
     while (attempts < 2 && !this._stopped) {
@@ -41,6 +42,10 @@ export default {
           signal: ctrl.signal,
           timeout: 60000,   // try to raise the runtime's short default (ignored if unsupported)
         })
+        if (!resp.ok) {
+          const body = await resp.text().catch(() => '')
+          throw new Error('HTTP ' + resp.status + ' ' + body.slice(0, 120))
+        }
         const reader = resp.body && typeof resp.body.getReader === 'function'
           ? resp.body.getReader()
           : null
@@ -65,8 +70,9 @@ export default {
           // some mini-app runtimes buffer the whole body instead of streaming
           feed(await resp.text())
         }
+        if (!this.data.answerText) throw new Error('未收到回复（桥返回空）')
         this.setData({ status: 'done' })
-        return
+        return true
       } catch (e) {
         if (attempts < 2 && e && e.name !== 'AbortError' && !this._stopped) {
           // transient network timeout — retry once
@@ -76,14 +82,15 @@ export default {
         }
         const msg = (e && e.name === 'AbortError')
           ? '（已停止）'
-          : ('（连接失败：' + (e && e.message || e) + '）')
+          : ('（' + (e && e.message || e) + '）')
         this.setData({ status: 'ready', answerText: msg })
-        return
+        return false
       } finally {
         clearTimeout(timer)
         this._abort = null
       }
     }
+    return false
   },
 
   // stop the current in-flight request + conversation loop
@@ -154,9 +161,16 @@ export default {
     const t = (text || '').trim()
     if (!t) { this._busy = false; return }
     if (this._isExit(t)) { this._endConversation(); this._busy = false; return }
-    this.ask(t).then(() => {
+    this.ask(t).then((ok) => {
       const ans = this.data.answerText
-      // mic stays ACTIVE while reading aloud (test whether TTS echo is actually a problem)
+      if (!ok || !ans) {
+        // FAILED (error already shown by ask) — stop listening, keep the error visible
+        this._busy = false
+        if (this._rec) { try { this._rec.stop() } catch (_) {} this._rec = null }
+        this.setData({ status: 'ready', inConversation: false })
+        return
+      }
+      // success — mic stays ACTIVE while reading aloud (test TTS echo)
       this._busy = false
       if (this._rec) { this.setData({ status: 'listening' }) }
       else { this.setData({ status: 'ready', inConversation: false }) }

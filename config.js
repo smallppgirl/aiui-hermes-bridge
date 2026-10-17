@@ -19,6 +19,9 @@ export const BRIDGE_CONFIG = {
   // NOTE: with continuous listening this may capture the glasses' own TTS (echo);
   // if that happens, set this to false (text-only, mic stays clean).
   readAloud: true,
+  // TTS voices by language. zh = Chinese female (female-yujie / female-tianmei /
+  // lovely_girl / male variants male-qn-jingying, male-qn-qingse); en = English.
+  ttsVoices: { zh: 'female-yujie', en: 'English_radiant_girl' },
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.

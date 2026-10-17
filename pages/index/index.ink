@@ -171,8 +171,8 @@ export default {
       if (typeof speechSynthesis !== 'undefined' && typeof SpeechSynthesisUtterance !== 'undefined') {
         const u = new SpeechSynthesisUtterance(text)
         const zh = this._asrLang && /^zh/i.test(this._asrLang)
-        // pick a native voice for the language so it doesn't sound like a foreigner
-        u.voice = zh ? 'Chinese (Mandarin)_News_Anchor' : 'English_radiant_girl'
+        const voices = BRIDGE_CONFIG.ttsVoices || {}
+        u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
         speechSynthesis.speak(u)
       }
     } catch (e) {}

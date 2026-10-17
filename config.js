@@ -27,6 +27,9 @@ export const BRIDGE_CONFIG = {
   // male-qn-jingying, male-qn-qingse); en = English (English_radiant_girl /
   // English_expressive_narrator / English_Trustworthy_Man).
   ttsVoices: { zh: 'female-yujie', en: 'English_radiant_girl' },
+  // true = show speech-recognition events (start / interim / final / error / end)
+  // in the hint line, to diagnose listening problems on the glasses.
+  debug: false,
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.

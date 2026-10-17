@@ -1,0 +1,79 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Hermes e2e</title>
+<!-- Fake AIUI host for the e2e run: real Ink runtime, scripted ASR/TTS (see e2e/run.mjs) -->
+<style>body{margin:0;background:#000}canvas{display:block}</style></head><body>
+<canvas id="c" width="480" height="352" tabindex="0"></canvas>
+<script type="module">
+import { createInkView, configNavigatorHost } from '/ink/index.js'
+const params = new URLSearchParams(location.search)
+const lang = params.get('lang') || 'zh-CN'
+const ttsMode = params.get('tts') || 'synth'
+const target = params.get('target') || '_blank'
+const W = target === '_current' ? 448 : 480, H = target === '_current' ? 150 : 352
+const synth = {}
+configNavigatorHost(null, null, null, [lang])
+// ---- fake host: records requests, lets the test inject recognizer events ----
+const log = (window.__log = [])
+const asr = (window.__asr = { sessions: [], index: 0 })
+const tts = (window.__tts = [])
+let view
+const emit = (type, detail) => view.hostCapabilitiesTarget.dispatchEvent(new CustomEvent(type, { detail }))
+const cur = () => asr.sessions[asr.sessions.length - 1]
+window.__emit = (type, extra = {}) => { const s = cur(); emit('speech.' + type, { targetId: s.targetId, sessionId: s.sessionId, ...extra }) }
+window.__say = (transcript, isFinal = true) => {
+  const s = cur()
+  emit('speech.result', { targetId: s.targetId, sessionId: s.sessionId, resultIndex: s.index, isFinal, alternatives: [{ transcript, confidence: 0.9 }] })
+  if (isFinal) s.index++
+}
+window.__key = (code) => { view.dispatchInput('keydown', code); view.dispatchInput('keyup', code) }
+const session = (req) => { asr.sessions.push({ targetId: req.targetId, sessionId: req.sessionId, index: 0, audioBytes: 0 }); setTimeout(() => emit('speech.start', { targetId: req.targetId, sessionId: req.sessionId }), 10) }
+const endOf = (req) => setTimeout(() => emit('speech.end', { targetId: req.targetId, sessionId: req.sessionId }), 10)
+const host = {
+  speech: {
+    // SpeechRecognition (runtime 0.18): mic via MediaRecorder -> host ASR stream
+    getRecognitionCapabilities() {
+      return { audioFormats: [{ mimeType: 'audio/ogg;codecs=opus' }, { mimeType: 'audio/wav' }, { mimeType: 'audio/webm;codecs=opus' }],
+        maxChunkBytes: 65536, interimResults: true, maxAlternatives: 1, phrases: false, contextUpdates: false, segmentationModes: ['auto'] }
+    },
+    openRecognitionStream(req) { log.push('asr.open ' + req.lang + ' ' + req.audio.mimeType); session(req) },
+    writeRecognitionAudio(req) { const s = asr.sessions.find((x) => x.sessionId === req.sessionId); if (s) s.audioBytes += req.bytes.length },
+    finishRecognitionStream(req) { log.push('asr.finish'); endOf(req) },
+    abortRecognitionStream(req) { log.push('asr.abortStream'); endOf(req) },
+    // direct host recognition, in case the runtime uses it instead
+    startRecognition(req) { log.push('asr.start ' + req.lang); session(req) },
+    stopRecognition(req) { log.push('asr.stop'); endOf(req) },
+    abortRecognition(req) { log.push('asr.abort'); endOf(req) },
+    // speak(): resolves when "done" (40 ms per character)
+    speak(req) {
+      log.push('tts.speak voice=' + req.voice + ' lang=' + req.lang + ' len=' + req.text.length); tts.push(req)
+      return new Promise((r) => setTimeout(() => { log.push('tts.speak.done'); r() }, req.text.length * 40))
+    },
+    cancelSpeak() { log.push('tts.cancel') },
+    // synthesize(): streams silent 16 kHz PCM paced in real time, one cue per sentence
+    ...(ttsMode === 'synth' ? { synthesize(req) {
+      log.push('tts.synth voice=' + req.voice + ' lang=' + req.lang + ' len=' + req.text.length + ' subs=' + req.subtitleGranularity); tts.push(req)
+      const id = req.synthesisId
+      const sentences = req.text.match(/[^。！？.!?]+[。！？.!?]*/g) || [req.text]
+      let t = 0, at = 0, seq = 0
+      const timers = (synth[id] = [])
+      for (const sen of sentences) {
+        const ms = sen.length * 40
+        const cue = { id: 'c' + seq, text: sen, startTimeMs: t, endTimeMs: t + ms, charIndex: at, charLength: sen.length }
+        const audio = new Uint8Array(Math.round(16000 * 2 * ms / 1000))
+        const n = seq++
+        timers.push(setTimeout(() => emit('speech.synthesisChunk', { synthesisId: id, sequence: n, audio, cues: [cue] }), 20 * n))
+        t += ms; at += sen.length
+      }
+      timers.push(setTimeout(() => { log.push('tts.synth.end'); emit('speech.synthesisEnd', { synthesisId: id, durationMs: t }) }, 20 * seq + 10))
+      return { synthesisId: id, mimeType: 'audio/pcm', audioConfig: { format: 'pcm', sampleRate: 16000, channels: 1, sampleFormat: 's16' }, language: req.lang, subtitleGranularity: req.subtitleGranularity }
+    },
+    abortSynthesis(req) { log.push('tts.synth.abort'); (synth[req.synthesisId] || []).forEach(clearTimeout); emit('speech.synthesisAborted', { synthesisId: req.synthesisId }) } } : {}),
+  },
+}
+const canvas = document.getElementById('c'); canvas.width = W; canvas.height = H
+view = await createInkView({ width: W, height: H, layoutMode: 'bounded', scaleFactor: 1, appFps: 30, canvas, hostOptions: { initialTarget: target } })
+view.setHostCapabilities(host)
+window.__view = view
+const files = Object.fromEntries((await (await fetch('/bundle.json')).json()).map((f) => [f.path, Uint8Array.from(atob(f.base64), (c) => c.charCodeAt(0))]))
+view.openBundle({ appId: 'hermes', files, hostOptions: { initialTarget: target } }); if (typeof view.setTarget === 'function') view.setTarget(target)
+window.__ready = true
+</script></body></html>

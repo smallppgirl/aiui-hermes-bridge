@@ -29,9 +29,23 @@ bridge over SSE and renders the streamed answer on the glasses HUD.
    and test on-device.
 
 ## Tests
-`npm test` (Node 20+) runs the page logic against fakes of the AIUI runtime
-(speech recognition, TTS, SSE fetch, scroll-view) — no glasses, bridge or real AK needed.
-`test/` is excluded from the `.aix` package via `.aixignore`.
+- `npm test` (Node 20+) — unit tests of the page logic against fakes of the AIUI runtime
+  (speech recognition, TTS, SSE fetch, scroll-view). No glasses, bridge or real AK needed.
+- `npm run e2e` — end-to-end run on the **real AIUI runtime** (`@yodaos-pkg/ink`, same version
+  as the glasses) in headless Chromium. A fake glasses host feeds speech results and plays TTS,
+  a fake bridge answers; it covers full screen (`_blank`) and the card in the conversation flow
+  (`_current`), Chinese and English. Screenshots of every step land in `e2e/out/`.
+  First time: `npm install && npx playwright install chromium`.
+- `test/` and `e2e/` are excluded from the `.aix` package via `.aixignore`.
+
+Runtime facts found this way (they differ from a browser):
+- `clearTimeout` / `clearInterval` **throw** on `undefined` / `null` — always guard them.
+- `window.innerHeight` is `0`; the page sizes itself from `onTargetChanged(target)`
+  (`_current` card = 448×150, `_blank` full screen = 480×352).
+- `AudioPlayer.play()` is unavailable in the card (`_current`), so answers are read with
+  `speechSynthesis.speak()` there (whose end event is not reported — listening resumes after
+  the estimated speaking time, or on a temple tap); full screen uses `synthesize()` + player.
+- Set `debug: true` in `config.js` to show speech-recognition events in the hint line.
 
 ## Notes
 - The bridges accept the Rokid/lingzhu-style body; extra fields are ignored. `take_photo` tool_calls

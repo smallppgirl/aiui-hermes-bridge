@@ -62,19 +62,42 @@ test('UI strings and status chip follow the system language', () => {
   assert.equal(en.data.chip, 'READY')
   en._setStatus('working')
   assert.equal(en.data.chip, 'THINKING')
-  en._setStatus('listening', { inConversation: true })
+  en._setStatus('listening')
   assert.equal(en.data.chip, 'LISTENING')
-  assert.equal(en.data.inConversation, true)
   assert.equal(en.data.strings.thinking, 'Thinking…')
   const forced = makePage({ lang: 'en-US', config: { lang: 'zh-CN' } })   // config overrides system
   assert.equal(forced.data.chip, '就绪')
 })
 
-test('scroll-view height from the viewport', () => {
+test('scroll-view height from the viewport; small card hides the footer', () => {
   assert.equal(makePage({ innerHeight: 352 }).data.scrollH, 266)
+  assert.equal(makePage({ innerHeight: 352 }).data.compact, false)
   assert.equal(makePage({ innerHeight: 352, config: { showTalkButton: true } }).data.scrollH, 220)
-  assert.equal(makePage({ innerHeight: 0 }).data.scrollH, 266)   // falls back to the 352px canvas
-  assert.equal(makePage({ innerHeight: 100 }).data.scrollH, 120) // minimum
+  assert.equal(makePage({ innerHeight: 0 }).data.scrollH, 266)    // falls back to the 352px canvas
+  const card = makePage({ innerHeight: 150 })                       // 448x150 card in the conversation flow
+  assert.equal(card.data.compact, true)
+  assert.equal(card.data.scrollH, 90)
+  assert.equal(makePage({ innerHeight: 100 }).data.scrollH, 60)   // minimum
+})
+
+test('target: card (_current) is compact and skips the audio player; full screen is not', () => {
+  const p = makePage({ innerHeight: 0 })   // the runtime reports innerHeight = 0
+  p.onTargetChanged('_current', null)
+  assert.equal(p.data.compact, true)
+  assert.equal(p.data.scrollH, 90)
+  assert.equal(p._noPlayer, true)
+  p.onTargetChanged('_blank', '_current')  // double tap -> full screen
+  assert.equal(p.data.compact, false)
+  assert.equal(p.data.scrollH, 266)
+  assert.equal(p._noPlayer, false)
+})
+
+test('card target: answers are read with speak() without trying synthesize()', async () => {
+  setTTS('synth', 10)
+  const p = makePage()
+  p.onTargetChanged('_current', null)
+  await askOnce(p, 'q', '回答')
+  assert.deepEqual(tts.log, ['speak:female-yujie'])
 })
 
 // ---------------- bridge request / SSE ----------------
@@ -126,7 +149,6 @@ test('HTTP error: retried once, then shows the error and stops listening', async
   assert.equal(net.calls.length, 2)
   assert.equal(botLines(p)[0], '（HTTP 500 boom）')
   assert.equal(p.data.status, 'ready')
-  assert.equal(p.data.inConversation, false)
   assert.equal(p._rec, null)
   assert.ok(rec.calls.includes('stop'))
   assert.equal(tts.log.length, 0)
@@ -167,7 +189,6 @@ test('Backspace while thinking aborts the request without retry', async () => {
   await until(() => !p._busy && botLines(p)[0] === '（已停止）')
   assert.equal(net.calls.length, 1)
   assert.equal(p.data.status, 'ready')
-  assert.equal(p.data.inConversation, false)
   assert.equal(p._rec, null)
 })
 
@@ -235,16 +256,31 @@ test('interim results print the question live in one line, final settles it', as
   assert.equal(net.calls[0].body.message[0].text, '今天天气怎么样？')
 })
 
-test('a tap while a question is half recognized drops the half line', async () => {
+test('a tap while listening keeps the recognizer and the half-recognized line', async () => {
   setTTS('synth')
   const p = makePage()
   tap(p)
   lastRec().emit('半句', false)
   await sleep(20)
-  assert.deepEqual(userLines(p), ['半句'])
   tap(p)
+  assert.equal(recs.length, 1)
+  assert.equal(recs[0].calls.join(), 'start')   // never aborted by a tap
+  assert.deepEqual(userLines(p), ['半句'])
+})
+
+test('a tap after the recognizer ended starts a new one and drops the half line', async () => {
+  setTTS('synth')
+  const p = makePage()
+  tap(p)
+  lastRec().emit('半句', false)
+  await sleep(20)
+  recs[0].onend()
+  tap(p)
+  assert.equal(recs.length, 2)
+  assert.equal(p._rec, recs[1])
+  assert.deepEqual(recs[0].calls, ['start'])   // the ended one is not aborted
   assert.deepEqual(userLines(p), [])
-  assert.equal(p._draftId, null)
+  assert.equal(p.data.status, 'listening')
 })
 
 test('results while thinking are ignored (one request only)', async () => {
@@ -273,7 +309,6 @@ test('exit word ends the conversation without calling the bridge', async () => {
   assert.equal(net.calls.length, 0)
   assert.equal(p.data.turns.at(-1).text, '（会话已结束）')
   assert.equal(p.data.status, 'ready')
-  assert.equal(p.data.inConversation, false)
   assert.equal(p._rec, null)
   assert.equal(p._busy, false)
   assert.ok(rec.calls.includes('stop'))
@@ -364,9 +399,36 @@ test('synthesize never ends: safety-net timer finishes reading', async () => {
   lastRec().emit('q')
   await until(() => tts.log.includes('play'))
   assert.equal(p.data.status, 'speaking')   // playback started but never ends...
-  await until(idle(p), 2000)                // ...the safety net finishes it
+  await until(idle(p), 4000)                // ...the safety net finishes it
   assert.ok(tts.log.includes('player.stop'))
   assert.equal(p.data.status, 'listening')
+})
+
+test('card target (play() unavailable): falls back to speak()', async () => {
+  setTTS('synth-card', 20)
+  const p = makePage()
+  await askOnce(p, 'q', '回答')
+  assert.deepEqual(tts.log, ['synth:female-yujie', 'task.abort', 'player.destroy', 'speak:female-yujie'])
+  assert.equal(p.data.status, 'listening')
+  assert.equal(p._tts, null)
+})
+
+test('card target: after one play() failure, later answers use speak() directly', async () => {
+  setTTS('synth-card', 10)
+  const p = makePage()
+  await askOnce(p, 'q1', '回答一')
+  tts.log.length = 0
+  await askOnce(p, 'q2', '回答二')
+  assert.deepEqual(tts.log, ['speak:female-yujie'])   // no wasted synthesize()
+})
+
+test('synthesize: once generation ends, the safety net shrinks to the real length', async () => {
+  setTTS('synth-hang')   // plays but never reports ended; generation ends with duration 0.1s
+  const p = makePage()
+  const t0 = Date.now()
+  await askOnce(p, 'q', '这是一个比较长的回答，正常估计要读很久很久。')
+  assert.ok(Date.now() - t0 < 4000, 'finished ~2s after the real audio length, not the long estimate')
+  assert.ok(tts.log.includes('player.stop'))
 })
 
 test('speak() whose end event never fires: fallback timer finishes reading', async () => {
@@ -403,20 +465,17 @@ test('tap while reading stops the voice and listens immediately', async () => {
   const p = makePage()
   net.queue.push({ body: sse('很长的回答') })
   tap(p)
-  const first = lastRec()
-  first.emit('q')
+  const rec = lastRec()
+  rec.emit('q')
   await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
   tap(p)
   assert.equal(p.data.status, 'listening')
   assert.equal(p._busy, false)
   assert.ok(tts.log.includes('player.stop') && tts.log.includes('player.destroy'))
-  assert.equal(recs.length, 2)
-  assert.notEqual(p._rec, first)
-  await sleep(20)                     // old recognizer's late onend must not clear the new one
-  assert.equal(p._rec, recs[1])
-  assert.equal(p.data.status, 'listening')
+  assert.equal(recs.length, 1)            // same recognizer, not restarted
+  assert.deepEqual(rec.calls, ['start'])
   net.queue.push({ body: sse('第二个回答') })
-  recs[1].emit('next')                // a new question works right away (no mute after a tap)
+  rec.emit('next')                        // a new question works right away (no mute after a tap)
   await until(() => botLines(p).length === 2 && !p._busy)
   assert.deepEqual(userLines(p), ['q', 'next'])
 })
@@ -460,50 +519,72 @@ test('echo guard: speech right after reading is ignored, later speech is used', 
   assert.deepEqual(userLines(p), ['q1', 'q2'])
 })
 
-test('recognizer dies while idle: shows READY, tap reopens it', async () => {
+test('error event (e.g. no-speech) does not stop listening or drop results', async () => {
+  setTTS('synth', 20)
+  const p = makePage()
+  tap(p)
+  const rec = lastRec()
+  rec.onerror({ error: 'no-speech' })
+  assert.equal(p.data.status, 'listening')
+  assert.equal(p._rec, rec)
+  await askOnce(p, '还在听吗', '在')
+  assert.deepEqual(botLines(p), ['在'])
+  assert.equal(p.data.status, 'listening')
+})
+
+test('end event 1s after start (as on the glasses): screen stays LISTENING, speech still works', async () => {
+  setTTS('synth', 20)
+  const p = makePage()
+  tap(p)
+  const rec = lastRec()
+  rec.onend()
+  assert.equal(p.data.status, 'listening')
+  await askOnce(p, '第一个', '一')
+  assert.equal(p.data.status, 'listening')   // after reading: still listening on the same recognizer
+  await askOnce(p, '第二个', '二')
+  assert.deepEqual(botLines(p), ['一', '二'])
+  assert.equal(recs.length, 1)
+})
+
+test('start() throws: READY, a later tap works', () => {
   setTTS('synth')
   const p = makePage()
-  tap(p)
-  assert.equal(p.data.status, 'listening')
-  lastRec().onerror({ error: 'no-speech' })
-  assert.equal(p.data.status, 'ready')
-  assert.equal(p._rec, null)
-  tap(p)
-  assert.equal(p.data.status, 'listening')
-  assert.equal(recs.length, 2)
-  assert.ok(recs[1].alive)
-})
-
-test('recognizer dies during reading: reopened after reading ends', async () => {
-  setTTS('synth', 150)
-  const p = makePage()
-  net.queue.push({ body: sse('回答') })
-  tap(p)
-  lastRec().emit('q')
-  await until(() => p.data.status === 'speaking')
-  recs[0].onend()
-  assert.equal(p.data.status, 'speaking')   // no READY flash while busy
-  await until(idle(p))
-  assert.equal(p.data.status, 'listening')
-  assert.equal(recs.length, 2)
-  assert.ok(recs[1].alive)
-})
-
-test('reopen refused without a gesture: READY, a tap then works', async () => {
-  setTTS('synth', 100)
-  const p = makePage()
-  net.queue.push({ body: sse('回答') })
-  tap(p)
-  lastRec().emit('q')
-  await until(() => p.data.status === 'speaking')
-  recs[0].onend()
   FakeRec.failStart = true
-  await until(idle(p))
+  tap(p)
   assert.equal(p.data.status, 'ready')
   assert.equal(p._rec, null)
   FakeRec.failStart = false
   tap(p)
   assert.equal(p.data.status, 'listening')
+  assert.equal(recs.length, 2)
+})
+
+test('results from a recognizer we stopped are ignored', async () => {
+  setTTS('synth')
+  const p = makePage()
+  tap(p)
+  const rec = lastRec()
+  key(p, 'Backspace')
+  assert.ok(rec.calls.includes('abort'))
+  rec.emit('迟到的结果')
+  rec.emit('迟到', false)
+  await sleep(20)
+  assert.equal(net.calls.length, 0)
+  assert.deepEqual(p.data.turns, [])
+})
+
+test('debug: recognizer events shown in the hint line', async () => {
+  setTTS('synth')
+  const p = makePage({ config: { debug: true } })
+  tap(p)
+  assert.equal(p.data.hint, 'asr: start')
+  lastRec().onerror({ error: 'network' })
+  assert.equal(p.data.hint, 'asr: error network')
+  lastRec().onend()
+  assert.equal(p.data.hint, 'asr: end')
+  const off = makePage()
+  tap(off)
+  assert.equal(off.data.hint, '正在听 · 说完即可')
 })
 
 test('no SpeechRecognition API: tap leaves the page ready', () => {
@@ -535,7 +616,6 @@ test('Backspace while reading stops the voice and the conversation', async () =>
   await sleep(10)
   assert.ok(tts.log.includes('player.stop'))
   assert.equal(p.data.status, 'ready')
-  assert.equal(p.data.inConversation, false)
   assert.equal(p._rec, null)
 })
 
@@ -581,12 +661,13 @@ for (const mode of ['entity', 'binding']) {
     setTTS('synth', 10)
     const p = makePage({ scroll: mode, config: { readAloud: false } })
     await askOnce(p, 'q1', '长'.repeat(400))
+    await sleep(100)   // follow-scroll runs ~50ms after a render
     p._muteUntil = 0
     const before = p.sv.scrollHeight
     net.queue.push({ hang: true })
     lastRec().emit('q2')
     await until(() => p.data.status === 'working')
-    await sleep(30)
+    await sleep(100)
     assert.ok(Math.abs(p._turnStart - before) <= 1, `turnStart ${p._turnStart} vs ${before}`)
     assert.ok(p.sv.scrollTop <= p._turnStart, 'question start not scrolled past')
     assert.ok(p.sv.scrollTop >= p._turnStart - p.sv.clientHeight, 'question visible')

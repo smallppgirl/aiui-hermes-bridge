@@ -29,6 +29,15 @@ export async function until(cond, ms = 3000) {
 }
 const setGlobal = (k, v) => Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true })
 
+// like the AIUI (QuickJS) runtime: clearing an undefined/null timer throws
+for (const name of ['clearTimeout', 'clearInterval']) {
+  const real = globalThis[name]
+  setGlobal(name, (id) => {
+    if (id == null) throw new TypeError(`Error converting from js '${id}' into type 'i32' (${name})`)
+    return real(id)
+  })
+}
+
 // ---- speech recognition ----
 export const recs = []
 export class FakeRec {
@@ -39,7 +48,7 @@ export class FakeRec {
   emit(t, isFinal = true) { this.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: t }], { isFinal })] }) }
 }
 
-// ---- TTS: mode = synth | synth-fail | synth-hang | speak | speak-noend | none ----
+// ---- TTS: mode = synth | synth-fail | synth-hang | synth-card | speak | speak-noend | none ----
 export const tts = { log: [], utterances: [], cues: [] }
 export function setTTS(mode, durationMs = 60) {
   tts.log.length = 0
@@ -79,8 +88,9 @@ export function setTTS(mode, durationMs = 60) {
       tts.player = this
     }
     play() {
+      if (mode === 'synth-card') throw new Error('AudioPlayer.play() is unavailable while InkView target is _current')
       tts.log.push('play')
-      if (mode === 'synth-hang') return
+      if (mode === 'synth-hang') { setTimeout(() => this.task.onend && this.task.onend({ duration: 0.1 }), 20); return }
       // emit the configured cues spread over the duration, then end
       tts.cues.forEach((c, i) => setTimeout(() => { this._active = c; this._cueListeners.forEach((f) => f()) },
         (durationMs * (i + 1)) / (tts.cues.length + 1)))

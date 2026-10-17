@@ -3,3 +3,4 @@ node_modules/
 *.log
 .venv/
 secrets.js
+e2e/out/

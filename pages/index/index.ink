@@ -18,11 +18,11 @@ export default {
     chip: '',
     hint: '',
     turns: [],              // dialog history: { id, role: 'user' | 'bot' | 'note', text, pending }
-    inConversation: false,
     strings: {},            // set in onLoad from the system language
     showTalkButton: false,  // from config
     scrollTop: 0,           // scroll-top binding (used when the entity scroll API is missing)
     scrollH: 266,           // scroll-view height in px, computed in onLoad
+    compact: false,         // small host (the 448x150 card): footer hidden
   },
 
   // ---- call the Hermes/Claude bridge and stream the answer into a new dialog line ----
@@ -104,7 +104,7 @@ export default {
   stop() {
     this._teardown()
     this._draftId = null
-    this._setStatus('ready', { inConversation: false })
+    this._setStatus('ready')
   },
 
   onUnload() {
@@ -249,7 +249,13 @@ export default {
   },
 
   // keep the newest text in view, but never past the start of the current question
+  // (a moment later, once the runtime has laid out the new content)
   _follow() {
+    if (this._followTimer) return
+    this._followTimer = setTimeout(() => { this._followTimer = null; this._followNow() }, 50)
+  },
+
+  _followNow() {
     if (this._reading) return
     const m = this._metrics()
     if (!m) return this._scrollTo(1)   // size unknown yet: a 1px nudge reports it via bindscroll
@@ -297,7 +303,8 @@ export default {
   },
 
   _stopReadScroll() {
-    clearInterval(this._readTimer)
+    // guard: the AIUI runtime throws on clearInterval(undefined / null)
+    if (this._readTimer) clearInterval(this._readTimer)
     this._readTimer = null
     this._reading = false
   },
@@ -310,60 +317,70 @@ export default {
       this._stopSpeaking()
       this._busy = false
     }
-    if (!this._busy) this._startListening(true)   // still thinking: ignore
+    if (!this._busy) this._startListening()   // still thinking: ignore
   },
 
+  // retire the recognizer we own: we stopped it, so ignore anything it still sends
   _dropRec(method) {
     const rec = this._rec
     this._rec = null
-    if (rec) { try { rec[method]() } catch (_) {} }
+    if (rec) { rec._retired = true; try { rec[method]() } catch (_) {} }
   },
 
-  // fresh = drop the current recognizer first (it may have died without onend)
-  _startListening(fresh) {
-    if (this._rec && !fresh) { if (!this._busy) this._setStatus('listening'); return }
-    this._dropRec('abort')
+  // On the glasses the recognizer can report error/end early and still deliver
+  // results, so neither event retires it or changes the screen. A tap only creates
+  // a new recognizer once the current one has reported end.
+  _startListening() {
+    if (this._rec && !this._rec._ended) { if (!this._busy) this._setStatus('listening'); return }
+    this._rec = null
     if (typeof SpeechRecognition === 'undefined') return this._setStatus('ready')
     this._stopped = false
-    if (this._draftId) {   // a restart drops the half-recognized question line
+    if (this._draftId) {   // a new recognizer drops the half-recognized question line
       const id = this._draftId
       this._draftId = this._draftReady = null
       this.setData({ turns: this.data.turns.filter((t) => t.id !== id) })
     }
-    if (!this._busy) this._setStatus('listening', { inConversation: true })
+    if (!this._busy) this._setStatus('listening')
     const rec = (this._rec = new SpeechRecognition())
     rec.lang = this._asrLang || BRIDGE_CONFIG.lang
     rec.continuous = true
     rec.interimResults = true
     rec.onresult = (e) => {
-      if (this._rec !== rec) return                    // a replaced recognizer
+      if (rec._retired) return                         // a recognizer we stopped
       if (Date.now() < (this._muteUntil || 0)) return  // tail of our own TTS
       const results = e.results || []
       let interim = ''
       for (let i = e.resultIndex; i < results.length; i++) {
         const t = results[i] && results[i][0] && results[i][0].transcript
         if (!t) continue
+        this._debug((results[i].isFinal ? 'final ' : 'interim ') + t)
         if (results[i].isFinal) this._handleUtterance(t)
         else interim += t
       }
       if (interim) this._onInterim(interim)
     }
-    // the recognizer stopped (error / silence timeout): don't keep showing LISTENING
-    const ended = () => {
-      if (this._rec !== rec) return
+    rec.onerror = (e) => this._debug('error ' + (e && (e.error || e.message)))
+    rec.onend = () => { rec._ended = true; this._debug('end') }
+    try {
+      rec.start()
+      this._debug('start')
+    } catch (e) {
       this._rec = null
       if (!this._busy) this._setStatus('ready')
+      this._debug('start failed ' + (e && e.message))
     }
-    rec.onerror = rec.onend = ended
-    try { rec.start() } catch (e) { ended() }
   },
 
-  // after an answer: keep listening if the recognizer is alive, else try to reopen it
+  // config debug: show recognizer events in the hint line (and the console)
+  _debug(msg) {
+    console.log('[asr]', msg)
+    if (BRIDGE_CONFIG.debug) this.setData({ hint: 'asr: ' + msg })
+  },
+
+  // after an answer: keep listening on the recognizer we own (a tap renews it)
   _resumeListening() {
     this._muteUntil = Date.now() + 700
-    if (this._rec) return this._setStatus('listening')
-    if (this._stopped || !this.data.inConversation) return this._setStatus('ready')
-    this._startListening(false)   // may be refused without a gesture -> READY, tap to talk
+    this._setStatus(this._rec ? 'listening' : 'ready')
   },
 
   async _handleUtterance(text) {
@@ -378,7 +395,7 @@ export default {
       // FAILED (error already shown by ask) — stop listening, keep the error visible
       this._busy = false
       this._dropRec('stop')
-      return this._setStatus('ready', { inConversation: false })
+      return this._setStatus('ready')
     }
     const zh = this._isChinese(ans)
     if (BRIDGE_CONFIG.readAloud !== false) {
@@ -413,13 +430,13 @@ export default {
         finish: (interrupted) => {
           if (this._tts !== tts) return
           this._tts = this._ttsProgress = null
-          clearTimeout(timer)
+          if (timer) clearTimeout(timer)
           resolve(!!interrupted)
         },
       }
       this._tts = tts
       if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') return tts.finish(false)
-      const arm = (ms) => { clearTimeout(timer); timer = setTimeout(() => this._stopSpeaking(false), Math.min(300000, ms)) }
+      const arm = (ms) => { if (timer) clearTimeout(timer); timer = setTimeout(() => this._stopSpeaking(false), Math.min(300000, ms)) }
       const u = new SpeechSynthesisUtterance(text)
       u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
       u.lang = zh ? 'zh-CN' : 'en-US'
@@ -430,15 +447,30 @@ export default {
         this._startReadScroll(est)
         try { speechSynthesis.speak(u) } catch (_) { tts.finish(false) }
       }
-      if (typeof speechSynthesis.synthesize !== 'function' || typeof SpeechAudioPlayer === 'undefined') return speakSimple()
+      if (this._noPlayer || typeof speechSynthesis.synthesize !== 'function' || typeof SpeechAudioPlayer === 'undefined') return speakSimple()
       arm(est * 1.5 + 8000)   // safety net only; onEnded normally ends it
       speechSynthesis.synthesize(u, { subtitles: 'sentence' }).then((task) => {
         if (this._tts !== tts) { try { task.abort() } catch (_) {} return }
         const player = (tts.player = new SpeechAudioPlayer(task, { trackMode: 'hidden' }))
         tts.task = task
-        player.audioPlayer.onCanplay(() => { if (this._tts === tts) { try { player.play() } catch (_) {} } })
+        // AudioPlayer.play() is unavailable in the card (_current) target: fall back to speak()
+        const fallback = () => {
+          this._noPlayer = true   // until the target changes
+          try { task.abort() } catch (_) {}
+          try { player.destroy() } catch (_) {}
+          tts.player = tts.task = null
+          speakSimple()
+        }
+        player.audioPlayer.onCanplay(() => {
+          if (this._tts !== tts || !tts.player) return
+          try { player.play() } catch (_) { fallback() }
+        })
         player.audioPlayer.onEnded(() => tts.finish(false))
         task.onerror = () => tts.finish(false)
+        // generation done: the real length is known, so tighten the safety net
+        task.onend = (e) => {
+          if (this._tts === tts && tts.player && e && e.duration > 0) arm((e.duration - (player.currentTime || 0)) * 1000 + 2000)
+        }
         player.textTrack.addEventListener('cuechange', () => {
           const cue = player.textTrack.activeCues.item(0)
           if (cue && Number.isInteger(cue.charIndex)) {
@@ -483,7 +515,6 @@ export default {
     this._busy = false
     this._turnStart = null
     this._setStatus('ready', {
-      inConversation: false,
       turns: this.data.turns.concat([{ id: this._nextId(), role: 'note', text: this.data.strings.ended || '（会话已结束）' }]),
     })
     setTimeout(() => this._follow(), 50)
@@ -543,7 +574,7 @@ export default {
     this.setData({
       strings: this._strings(this._asrLang),
       showTalkButton: BRIDGE_CONFIG.showTalkButton === true,
-      scrollH: this._scrollHeightPx(),
+      ...this._layout(),
     })
     this._setStatus('ready')
     // semantic wake-up: "Hi Rokid, open the xxx agent" may pass the spoken query.
@@ -554,13 +585,25 @@ export default {
   },
 
   // the scroll-view needs a definite pixel height to overflow (a flex/100% height
-  // grows with its content and is just clipped, so nothing can scroll)
-  _scrollHeightPx() {
-    let h = 352   // Rokid Glasses reference canvas height
+  // grows with its content and is just clipped, so nothing can scroll).
+  // The runtime reports window.innerHeight = 0, so the size comes from the target:
+  // the card in the conversation flow (_current) is 448x150 with the footer hidden.
+  _layout() {
+    let h = 352   // Rokid Glasses full-screen (_blank) canvas height
     try { if (typeof window !== 'undefined' && window.innerHeight > 0) h = window.innerHeight } catch (_) {}
-    // app padding 12+12, head 28, foot 8+18 (+46 with the Talk button), gap 8
-    const chrome = 86 + (BRIDGE_CONFIG.showTalkButton === true ? 46 : 0)
-    return Math.max(120, Math.floor(h - chrome))
+    if (this._target === '_current') h = Math.min(h, 150)
+    const compact = h < 250
+    // app padding 12+12, head 28, gap 8, foot 8+18 (+46 with the Talk button)
+    const chrome = compact ? 60 : 86 + (BRIDGE_CONFIG.showTalkButton === true ? 46 : 0)
+    return { scrollH: Math.max(60, Math.floor(h - chrome)), compact }
+  },
+
+  // fires at startup and on card (_current) <-> full screen (_blank, double tap).
+  // AudioPlayer.play() is unavailable in the card, so read aloud with speak() there.
+  onTargetChanged(target) {
+    this._target = target
+    this._noPlayer = target === '_current'
+    this.setData(this._layout())
   },
 
   // UI strings by language; zh for zh-*, otherwise English
@@ -601,7 +644,7 @@ export default {
         </view>
       </scroll-view>
     </view>
-    <view class="foot">
+    <view class="foot {{ compact ? 'hidden' : '' }}">
       <button class="talk {{ showTalkButton ? '' : 'hidden' }} {{ status === 'listening' ? 'listening' : status === 'working' ? 'working' : '' }}" bindtap="captureAndAsk">{{ strings.talk }}</button>
       <text class="hint">{{ hint }}</text>
     </view>
@@ -610,17 +653,17 @@ export default {
 
 <style>
 .app { display: flex; flex-direction: column; height: 100vh; padding: 12px 16px; box-sizing: border-box; overflow: hidden; }
-.head { display: flex; height: 28px; flex-shrink: 0; align-items: center; justify-content: space-between; width: 100%; }
+.head { display: flex; flex-direction: row; height: 28px; flex-shrink: 0; align-items: center; justify-content: space-between; width: 100%; }
 .brand { color: #40FF5E; font-size: 18px; font-weight: bold; letter-spacing: 1px; }
 .state { display: flex; flex-direction: row; align-items: center; }
-.chip { color: #123a1d; background: #40FF5E; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: bold; letter-spacing: 1px; }
+.chip { color: #123a1d; background-color: #40FF5E; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: bold; letter-spacing: 1px; }
 .body { width: 100%; flex-shrink: 0; margin-top: 8px; overflow: hidden; }
 .scroll { width: 100%; height: 266px; }
 .scroll::-webkit-scrollbar { width: 3px; background-color: transparent; }
 .scroll::-webkit-scrollbar-thumb { background-color: rgba(64,255,94,0.48); border-radius: 2px; }
 .log { display: flex; flex-direction: column; width: 100%; padding-right: 8px; padding-bottom: 12px; box-sizing: border-box; }
 .turn { width: 100%; margin-bottom: 8px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: #40FF5E; margin-right: 8px; flex: 0 0 auto; animation: pulse 1.1s ease-in-out infinite; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background-color: #40FF5E; margin-right: 8px; flex: 0 0 auto; animation: pulse 1.1s ease-in-out infinite; }
 .line { width: 100%; text-align: left; font-size: 20px; line-height: 30px; white-space: pre-wrap; }
 .bot { color: #40FF5E; }
 .user, .note, .idle, .pending { color: rgba(64,255,94,0.48); }

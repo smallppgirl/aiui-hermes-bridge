@@ -25,9 +25,9 @@ const CASES = [
 
 // questions: a long answer (needs scrolling) in the UI language, then a short one in the other
 const FAKE = {
-  zh: ['给我讲一个关于月亮的长故事', '很久以前，在一个宁静的小村庄里，住着一个喜欢看月亮的小女孩。每天晚上，她都会坐在院子里，抬头望着天上那轮明亮的月亮。她相信月亮上住着一位温柔的仙女，会在夜里守护着所有的孩子。有一天晚上，月亮突然变得特别亮，一道银色的光芒从天而降，落在了她的院子里。光芒中走出一只雪白的兔子，它告诉小女孩，月亮上的仙女生病了，需要人间最纯净的笑声才能治好。',
+  zh: ['给我讲一个关于月亮的长故事', '\n\n 很久以前，在一个宁静的小村庄里，住着一个喜欢看月亮的小女孩。每天晚上，她都会坐在院子里，抬头望着天上那轮明亮的月亮。她相信月亮上住着一位温柔的仙女，会在夜里守护着所有的孩子。有一天晚上，月亮突然变得特别亮，一道银色的光芒从天而降，落在了她的院子里。光芒中走出一只雪白的兔子，它告诉小女孩，月亮上的仙女生病了，需要人间最纯净的笑声才能治好。',
     'What time is it in London?', 'It is about three in the afternoon in London.'],
-  en: ['Tell me a long story about the moon', 'Long ago, in a quiet village, there lived a girl who loved to watch the moon. Every night she sat in the garden and looked up at its bright silver face. She believed a gentle fairy lived there, watching over all the children while they slept. One evening the moon grew brighter than ever, and a beam of silver light fell into her garden. Out of the light hopped a snow white rabbit, who told her the moon fairy was ill.',
+  en: ['Tell me a long story about the moon', '\n\n Long ago, in a quiet village, there lived a girl who loved to watch the moon. Every night she sat in the garden and looked up at its bright silver face. She believed a gentle fairy lived there, watching over all the children while they slept. One evening the moon grew brighter than ever, and a beam of silver light fell into her garden. Out of the light hopped a snow white rabbit, who told her the moon fairy was ill.',
     '伦敦现在几点？', '伦敦现在大约是下午三点。'],
 }
 const REAL = {
@@ -154,6 +154,11 @@ for (const c of CASES) {
   const voices = (await hostLog()).filter((l) => / voice=/.test(l))
   const voice2 = isChinese(ans2) ? 'female-yujie' : 'English_radiant_girl'
   check(voices.length >= 2 && voices.at(-1).includes('voice=' + voice2), `answer 2 voice follows its language (${voice2}): ${voices.at(-1)}`)
+  // what is shown/read = the whole answer without its leading blank lines/spaces
+  const spoken = await pg.evaluate(() => window.__tts.map((r) => r.text))
+  const lead = answered.slice(0, 2).map((x) => (x.a.match(/^\s*/)[0].length))
+  check(spoken.length >= 2 && [0, 1].every((i) => spoken[i] === answered[i].a.replace(/^\s+/, '')),
+    `answers read in full, leading whitespace trimmed (raw answers started with ${lead.join(' / ')} whitespace chars)`)
   check(JSON.stringify(asked) === JSON.stringify([q1, q2]), 'bridge got both questions (tap interrupted the reading): ' + JSON.stringify(asked))
 
   const before = await shot('before-swipe')

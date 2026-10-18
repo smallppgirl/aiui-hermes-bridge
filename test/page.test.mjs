@@ -659,6 +659,57 @@ test('tap while reading: the mic hearing our own voice is ignored, a real questi
   assert.deepEqual(userLines(p), ['q', '月球有多少岁了'])
 })
 
+test('tap while reading: a transcript mixing the voice and a question asks just the question', async () => {
+  setTTS('synth', 2000)
+  const p = makePage()
+  net.queue.push({ body: sse('月球是地球唯一的天然卫星，距离地球大约三十八万公里。') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  tap(p)
+  lastRec().emit('月球是地球唯一的天然卫星月球有', false)
+  await sleep(10)
+  assert.deepEqual(userLines(p), ['q', '月球有'])
+  net.queue.push({ body: sse('答。') })
+  lastRec().emit('月球是地球唯一的天然卫星月球有多大')
+  await until(() => botLines(p).length === 2 && !p._busy)
+  assert.deepEqual(userLines(p), ['q', '月球有多大'])
+  assert.equal(net.calls[1].body.message[0].text, '月球有多大')
+})
+
+test('tapped during reading: a question right after the voice ends is not swallowed', async () => {
+  setTTS('synth', 150)
+  const p = makePage()
+  net.queue.push({ body: sse('月球是地球唯一的天然卫星。') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  tap(p)
+  await until(() => !p._busy)                    // read to the end, no question yet
+  assert.equal(p._muteUntil, 0)
+  net.queue.push({ body: sse('答。') })
+  lastRec().emit('天然卫星月球有多大')           // the recognizer finalizes once the voice stops
+  await until(() => botLines(p).length === 2 && !p._busy)
+  assert.deepEqual(userLines(p), ['q', '月球有多大'])
+})
+
+test('debug: the hint shows the last three recognizer events', async () => {
+  setTTS('synth', 2000)
+  const p = makePage({ config: { debug: true } })
+  net.queue.push({ body: sse('月球是地球唯一的天然卫星。') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  tap(p)
+  lastRec().emit('地球唯一的天然卫星', false)
+  const parts = p.data.hint.split(' | ')
+  assert.equal(parts.length, 3)
+  assert.match(parts[1], /tap rec=live reading$/)
+  assert.match(parts[2], /echo 9→0$/)
+  key(p, 'Backspace')
+  await until(() => !p._busy)
+})
+
 test('tap while reading, then an exit word ends the conversation', async () => {
   setTTS('synth', 2000)
   const p = makePage()
@@ -690,19 +741,24 @@ test('tap while reading with speak() (no stop API) listens, the question still w
   assert.deepEqual(userLines(p), ['q', 'next'])
 })
 
-test('echo check compares neighbouring characters / words with the text being read', () => {
+test('echo strip: drops parts that repeat the answer, keeps the question', () => {
   const p = makePage()
-  p._tts = { text: 'The Moon is Earth\'s only natural satellite. 月球是地球唯一的天然卫星。' }
-  assert.equal(p._isEcho('only natural satellite'), true)
-  assert.equal(p._isEcho('the moon is earths only'), false)   // "earths" ≠ "earth s"
-  assert.equal(p._isEcho('Moon is Earth'), true)
-  assert.equal(p._isEcho('how far is the moon'), false)
-  assert.equal(p._isEcho('地球唯一的天然卫星'), true)
-  assert.equal(p._isEcho('月球离地球多远'), false)
-  assert.equal(p._isEcho('月球'), true)                       // short: contained = echo
-  assert.equal(p._isEcho('火星'), false)
-  p._tts = null
-  assert.equal(p._isEcho('only natural satellite'), false)
+  const ans = 'The Moon is Earth\'s only natural satellite. 月球是地球唯一的天然卫星，距离地球大约三十八万公里。'
+  const strip = (t) => p._stripEcho(t, ans)
+  assert.equal(strip('only natural satellite'), '')
+  assert.equal(strip('Moon is Earth'), '')
+  assert.equal(strip('how far is the moon'), 'how far is the moon')
+  assert.equal(strip('地球唯一的天然卫星'), '')
+  assert.equal(strip('月球离地球多远'), '月球离地球多远')       // shares a short phrase only
+  assert.equal(strip('月球'), '')                              // short: contained = echo
+  assert.equal(strip('火星'), '火星')
+  // the speaker and the user in one transcript
+  assert.equal(strip('月球是地球唯一的天然卫星月球有多大'), '月球有多大')
+  assert.equal(strip('火星有多远距离地球大约三十八万公里'), '火星有多远')
+  assert.equal(strip('the moon is earth s only natural satellite how old is it'), 'how old is it')
+  assert.equal(strip('唯一的天然卫星啊距离地球大约'), '')          // one leftover unit = noise
+  assert.equal(strip('天然卫星，距离地球 How old is it?'), 'How old is it?')
+  assert.equal(p._stripEcho('anything', ''), 'anything')
 })
 
 test('tap while thinking is ignored', async () => {
@@ -806,11 +862,11 @@ test('debug: recognizer events shown in the hint line', async () => {
   setTTS('synth')
   const p = makePage({ config: { debug: true } })
   tap(p)
-  assert.equal(p.data.hint, 'asr: start')
+  assert.match(p.data.hint, /^\d+\.\d tap rec=none \| \d+\.\d start$/)
   lastRec().onerror({ error: 'network' })
-  assert.equal(p.data.hint, 'asr: error network')
+  assert.match(p.data.hint, /tap rec=none \| .* start \| .* error network$/)
   lastRec().onend()
-  assert.equal(p.data.hint, 'asr: end')
+  assert.match(p.data.hint, / start \| .* error network \| .* end$/)
   const off = makePage()
   tap(off)
   assert.equal(off.data.hint, '正在听 · 说完即可')

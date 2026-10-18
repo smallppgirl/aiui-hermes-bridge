@@ -72,8 +72,15 @@ main (bd72f17)
 7. **Timing** — with `debug: true`, ask for a long answer and note the timing line.
    A big gap between `synth` and `audio` is the glasses' speech engine. Are the gaps
    between sentence segments audible?
-8. **Speaker echo** — tap while it reads: does the mic pick up its own voice? Exact echoes
-   are filtered; a badly garbled one could still get through.
+8. **Tap while reading does not really listen** (seen on the glasses with
+   `tap-keeps-reading`). Branch `asr-during-reading` changes two likely causes: the mic
+   hears the voice and the user in one transcript, which the echo check used to drop
+   whole (now only the parts repeating the answer are dropped, the question is kept); and
+   the 0.7 s echo guard after reading swallowed a question that arrived as the voice
+   stopped (now off when you tapped during the reading). Still to find out with
+   `debug: true` (the hint shows the last 3 recognizer events): does the recognizer
+   deliver anything while the voice plays (`interim …` / `echo …`), or does it end
+   (`end`, then `tap rec=ended`)?
 9. **ASR session lifecycle** — after a tap, stay silent 20–30 s, then speak: still heard?
 10. **Card ↔ full screen** — ask in the card, switch to full screen, ask again: right layout,
     and does `synthesize()` (and sentence-by-sentence reading) take over?

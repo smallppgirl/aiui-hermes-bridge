@@ -150,7 +150,9 @@ for (const c of CASES) {
   await say(q2.slice(0, 5), false)
   await wait(300)
   await shot('question-2-live')
-  await say(q2)              // only accepted if the tap really switched to listening
+  // the glasses mic hears the voice too: question 2 arrives mixed with answer 1's text
+  const echo = zh ? ans1.replace(/\s+/g, '').slice(10, 30) : ans1.split(/\s+/).slice(3, 10).join(' ')
+  await say(echo + ' ' + q2)  // only accepted if the tap really switched to listening
   await wait(100)
   check(stops() > stops0, 'question 2 ends the reading of answer 1')
   await wait(300)

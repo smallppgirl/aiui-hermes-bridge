@@ -329,6 +329,8 @@ export default {
   // A tap is a user gesture, so the mic is always allowed to open here.
   captureAndAsk() {
     this._muteUntil = 0   // a tap means "I'm about to speak": drop the TTS echo guard
+    const rec = this._rec
+    this._debug('tap rec=' + (!rec ? 'none' : rec._ended ? 'ended' : 'live') + (this._tts ? ' reading' : ''))
     if (this._tts) {
       this._barge = true
       this._startListening()
@@ -367,10 +369,16 @@ export default {
       if (Date.now() < (this._muteUntil || 0)) return  // tail of our own TTS
       const results = e.results || []
       let interim = ''
+      const echo = this._echoText()
       for (let i = e.resultIndex; i < results.length; i++) {
-        const t = results[i] && results[i][0] && results[i][0].transcript
+        let t = results[i] && results[i][0] && results[i][0].transcript
         if (!t) continue
-        if (this._tts && !this._isExit(t) && this._isEcho(t)) { this._debug('echo ' + t); continue }
+        if (echo && !this._isExit(t)) {
+          const kept = this._stripEcho(t, echo)
+          if (kept !== t) this._debug('echo ' + t.length + '→' + kept.length + (kept ? ' ' + kept : ''))
+          if (!kept) continue
+          t = kept
+        }
         this._debug((results[i].isFinal ? 'final ' : 'interim ') + t)
         if (results[i].isFinal) this._handleUtterance(t)
         else interim += t
@@ -389,10 +397,13 @@ export default {
     }
   },
 
-  // config debug: show recognizer events in the hint line (and the console)
+  // config debug: show the last recognizer events in the hint line (and the console)
   _debug(msg) {
     console.log('[asr]', msg)
-    if (BRIDGE_CONFIG.debug) this.setData({ hint: 'asr: ' + msg })
+    if (!BRIDGE_CONFIG.debug) return
+    const at = ((Date.now() / 1000) % 100).toFixed(1)
+    this._dbg = (this._dbg || []).concat(at + ' ' + (msg.length > 24 ? msg.slice(0, 24) + '…' : msg)).slice(-3)
+    this.setData({ hint: this._dbg.join(' | ') })
   },
 
   // timing of one answer, from the question: first text, answer complete, speech
@@ -408,9 +419,11 @@ export default {
     if (BRIDGE_CONFIG.debug) this.setData({ hint: m.list.slice(1).join(' · ') })
   },
 
-  // after an answer: keep listening on the recognizer we own (a tap renews it)
+  // after an answer: keep listening on the recognizer we own (a tap renews it).
+  // Speech right after the voice stops is its echo, unless a tap during the reading
+  // said a question is coming: then the echo check (_echoText) covers that moment.
   _resumeListening() {
-    this._muteUntil = Date.now() + 700
+    this._muteUntil = Date.now() < (this._echoUntil || 0) ? 0 : Date.now() + 700
     this._setStatus(this._rec ? 'listening' : 'ready')
   },
 
@@ -477,6 +490,8 @@ export default {
         finish: (interrupted) => {
           if (this._tts !== tts) return
           this._tts = this._ttsProgress = null
+          // tapped while reading: the question may arrive mixed with the end of the voice
+          if (this._barge) { this._lastRead = page._full; this._echoUntil = Date.now() + 3000 }
           this._barge = false
           if (timer) clearTimeout(timer)
           resolve(!!interrupted)
@@ -597,17 +612,44 @@ export default {
     tts.finish(interrupted)
   },
 
-  // while reading with the mic open: is this our own voice coming back? Compares
-  // pairs of neighbouring units (Han characters / words) with the text being read.
-  _isEcho(text) {
-    const units = (s) => (s || '').toLowerCase().match(/[\u3400-\u9fff\uf900-\ufaff]|[a-z0-9]+/g) || []
-    const t = units(text), a = units(this._tts && this._tts.text)
-    if (!t.length || !a.length) return false
-    if (t.length < 3) return (' ' + a.join(' ') + ' ').includes(' ' + t.join(' ') + ' ')
+  // the text the mic may be hearing from the speaker: the answer being read, and for a
+  // moment after a reading that was tapped (see _resumeListening)
+  _echoText() {
+    if (this._tts) return this._tts.text
+    return Date.now() < (this._echoUntil || 0) ? this._lastRead : ''
+  },
+
+  // While reading with the mic open, the recognizer hears the speaker and the user in one
+  // transcript. Drop the parts that repeat the answer (4+ neighbouring Han characters or
+  // 3+ words that also follow each other there; a question may share a short phrase with
+  // the answer) and keep the longest other stretch:
+  // the question. '' = only echo, the text itself = no echo.
+  _stripEcho(text, answer) {
+    const re = /[㐀-鿿豈-﫿]|[a-z0-9]+/g
+    const t = []
+    for (let m; (m = re.exec((text || '').toLowerCase()));) t.push({ u: m[0], start: m.index, end: m.index + m[0].length })
+    const a = (answer || '').toLowerCase().match(re) || []
+    if (!t.length || !a.length) return text
+    if (t.length < 3) return (' ' + a.join(' ') + ' ').includes(' ' + t.map((x) => x.u).join(' ') + ' ') ? '' : text
     const pairs = new Set(a.slice(1).map((u, i) => a[i] + ' ' + u))
-    let hits = 0
-    for (let i = 1; i < t.length; i++) if (pairs.has(t[i - 1] + ' ' + t[i])) hits++
-    return hits / (t.length - 1) >= 0.7
+    const echo = t.map(() => false)
+    for (let i = 1, run = 0; i < t.length; i++) {
+      run = pairs.has(t[i - 1].u + ' ' + t[i].u) ? run + 1 : 0
+      const word = t.slice(i - run, i + 1).some((x) => x.u.length > 1)
+      if (run >= (word ? 2 : 3)) for (let k = i - run; k <= i; k++) echo[k] = true
+    }
+    if (!echo.includes(true)) return text
+    let best = null
+    for (let i = 0; i < t.length;) {
+      if (echo[i]) { i++; continue }
+      let j = i
+      while (j + 1 < t.length && !echo[j + 1]) j++
+      if (!best || j - i > best[1] - best[0]) best = [i, j]
+      i = j + 1
+    }
+    if (!best || best[1] - best[0] < 1) return ''   // a single leftover unit is noise
+    // keep punctuation at the very start / end of the transcript
+    return text.slice(best[0] ? t[best[0]].start : 0, best[1] < t.length - 1 ? t[best[1]].end : text.length).trim()
   },
 
   // Chinese if Han characters make up a meaningful share of the text

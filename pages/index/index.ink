@@ -189,7 +189,7 @@ export default {
   // print the question as it is being recognized
   _onInterim(text) {
     const t = (text || '').trim()
-    if (this._busy || !t) return
+    if ((this._busy && !this._barge) || !t) return
     if (this._draftId) this._patchTurn(this._draftId, { text: t }).then(() => this._follow())
     else this._openUserTurn(t, true)
   },
@@ -314,13 +314,15 @@ export default {
   },
 
   // ---- continuous voice conversation (one tap, mic stays hot, no per-turn tap) ----
-  // temple tap: while reading = stop reading and listen now; otherwise (re)start
-  // listening. A tap is a user gesture, so the mic is always allowed to open here.
+  // temple tap: (re)start listening. While reading, the voice keeps going (like the
+  // native assistant) and the mic takes the next question, which then ends the reading.
+  // A tap is a user gesture, so the mic is always allowed to open here.
   captureAndAsk() {
     this._muteUntil = 0   // a tap means "I'm about to speak": drop the TTS echo guard
     if (this._tts) {
-      this._stopSpeaking()
-      this._busy = false
+      this._barge = true
+      this._startListening()
+      return this._setStatus(this._rec ? 'listening' : 'speaking')
     }
     if (!this._busy) this._startListening()   // still thinking: ignore
   },
@@ -358,6 +360,7 @@ export default {
       for (let i = e.resultIndex; i < results.length; i++) {
         const t = results[i] && results[i][0] && results[i][0].transcript
         if (!t) continue
+        if (this._tts && !this._isExit(t) && this._isEcho(t)) { this._debug('echo ' + t); continue }
         this._debug((results[i].isFinal ? 'final ' : 'interim ') + t)
         if (results[i].isFinal) this._handleUtterance(t)
         else interim += t
@@ -390,7 +393,8 @@ export default {
 
   async _handleUtterance(text) {
     const t = (text || '').trim()
-    if (this._busy || !t) return
+    if ((this._busy && !this._barge) || !t) return
+    if (this._barge) this._stopSpeaking()   // a question asked while reading ends the reading
     this._busy = true
     await this._commitUserTurn(t)
     if (this._isExit(t)) { this._endConversation(); return }
@@ -404,12 +408,12 @@ export default {
     }
     const zh = this._isChinese(ans)
     if (BRIDGE_CONFIG.readAloud !== false) {
-      // mic results IGNORED while reading aloud (avoid capturing the TTS echo)
+      // mic results ignored while reading aloud (TTS echo), unless a tap opened it
       this._setStatus('speaking')
       const interrupted = await this._speak(ans, zh)
+      if (interrupted) return   // a new question took over
       this._stopReadScroll()
-      this._turnStart = null
-      if (interrupted) return   // the tap already switched to listening
+      if (!this._draftId) this._turnStart = null   // keep it for a question being spoken
       this._scrollToEnd()
     } else {
       this._startReadScroll(this._estimateSpeechMs(ans, zh) * 0.7)
@@ -432,9 +436,11 @@ export default {
     return new Promise((resolve) => {
       let timer = null
       const tts = {
+        text,
         finish: (interrupted) => {
           if (this._tts !== tts) return
           this._tts = this._ttsProgress = null
+          this._barge = false
           if (timer) clearTimeout(timer)
           resolve(!!interrupted)
         },
@@ -496,7 +502,21 @@ export default {
     try { if (tts.player) tts.player.destroy() } catch (_) {}
     try { if (!tts.player && typeof speechSynthesis.cancel === 'function') speechSynthesis.cancel() } catch (_) {}
     this._stopReadScroll()
+    console.log('[tts] stop')
     tts.finish(interrupted)
+  },
+
+  // while reading with the mic open: is this our own voice coming back? Compares
+  // pairs of neighbouring units (Han characters / words) with the text being read.
+  _isEcho(text) {
+    const units = (s) => (s || '').toLowerCase().match(/[\u3400-\u9fff\uf900-\ufaff]|[a-z0-9]+/g) || []
+    const t = units(text), a = units(this._tts && this._tts.text)
+    if (!t.length || !a.length) return false
+    if (t.length < 3) return (' ' + a.join(' ') + ' ').includes(' ' + t.join(' ') + ' ')
+    const pairs = new Set(a.slice(1).map((u, i) => a[i] + ' ' + u))
+    let hits = 0
+    for (let i = 1; i < t.length; i++) if (pairs.has(t[i - 1] + ' ' + t[i])) hits++
+    return hits / (t.length - 1) >= 0.7
   },
 
   // Chinese if Han characters make up a meaningful share of the text
@@ -617,13 +637,13 @@ export default {
       chipReady: '就绪', chipListening: '聆听中', chipThinking: '思考中', chipSpeaking: '播报中',
       idle: '轻按眼镜腿开始对话', say: '请讲…', thinking: '正在思考…',
       talk: '说话', hintIdle: '眼镜腿 tap = 开始 · 说「退出」结束',
-      hintListening: '正在听 · 说完即可', hintWorking: '请稍候', hintSpeaking: '眼镜腿 tap = 打断并提问',
+      hintListening: '正在听 · 说完即可', hintWorking: '请稍候', hintSpeaking: '眼镜腿 tap = 提问',
       ended: '（会话已结束）',
     } : {
       chipReady: 'READY', chipListening: 'LISTENING', chipThinking: 'THINKING', chipSpeaking: 'SPEAKING',
       idle: 'Tap the temple to start', say: 'Your turn…', thinking: 'Thinking…',
       talk: 'Talk', hintIdle: 'temple tap = start · say "exit" to stop',
-      hintListening: 'listening · just speak', hintWorking: 'one moment', hintSpeaking: 'temple tap = interrupt & ask',
+      hintListening: 'listening · just speak', hintWorking: 'one moment', hintSpeaking: 'temple tap = ask',
       ended: '(conversation ended)',
     }
   },

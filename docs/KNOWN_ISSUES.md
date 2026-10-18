@@ -39,6 +39,21 @@ and the live e2e (`npm run e2e -- --live`) all pass.
 9. **Echo guard (0.7 s after reading ends)** — start speaking right after an answer
    ends, without a tap: does it hear its own voice, or drop your first words?
 
+10a. **Tap while reading keeps the voice going** (branch `tap-keeps-reading`) — the mic
+   is open while the speaker plays. Check: does it pick up its own voice? Text that
+   matches the answer being read is ignored, but a garbled echo could still get through.
+   In card mode `speak()` cannot be stopped, so a question asked mid-reading may overlap
+   answer 1's voice with answer 2's.
+
+## Reading starts late
+
+11. **The voice starts only after the whole answer has arrived.** Text shows as Hermes
+    streams it, but `_speak()` runs after `ask()` finishes, plus the TTS start-up time.
+    For a long answer that is several seconds of text on screen before the voice starts.
+    Fix idea: read sentence by sentence while the answer streams (queue each finished
+    sentence to `synthesize()`). Works in full screen; in card mode `speak()` reports no
+    end, so sentences can't be chained reliably there.
+
 ## Not on the glasses yet
 
 10. On branch `answer-trim-and-limit`, not on `main` yet: a temple swipe during/after reading is no longer pulled back to the

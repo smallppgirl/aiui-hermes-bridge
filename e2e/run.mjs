@@ -59,7 +59,7 @@ for (const c of CASES) {
   pg.on('console', (m) => {
     const t = m.text().replace(/%c|color:[^;]*;?|padding:[^;]*;?|background:[^;]*;?|font-weight:[^;]*;?/g, '').trim()
     if (/\bERROR\b|Uncaught/.test(t)) errors.push(t)
-    if (/\[(asr|dbg)\]/.test(t)) trace.push(((Date.now() - t0) / 1000).toFixed(1) + 's ' + t.replace(/^.*?(\[(asr|dbg)\])/, '$1').slice(0, 120))
+    if (/\[(asr|dbg|tts)\]/.test(t)) trace.push(((Date.now() - t0) / 1000).toFixed(1) + 's ' + t.replace(/^.*?(\[(asr|dbg|tts)\])/, '$1').slice(0, 120))
   })
 
   // fake bridge: one queued answer per request, SSE in small chunks
@@ -138,12 +138,20 @@ for (const c of CASES) {
   if (LIVE) check(needsScroll, `answer 1 is long enough to need scrolling (${ans1.length} chars)`)
   if (needsScroll) check(!reading0.equals(reading1), 'text scrolls while the answer is read')
 
-  // ---- tap interrupts the reading; question 2 in the other language ----
+  // ---- tap while reading: the voice goes on, the mic listens; question 2 (other language) ----
+  const stops = () => trace.filter((l) => l.includes('[tts] stop')).length
+  const stops0 = stops()
   await key('GlobalHook')
-  await wait(300)
-  await shot('tap-interrupt')
+  await wait(800)
+  await shot('tap-listening')
+  check(stops() === stops0, 'temple tap keeps the voice reading')
   answers.push({ text: a2, delay: 500 })
+  await say(q2.slice(0, 5), false)
+  await wait(300)
+  await shot('question-2-live')
   await say(q2)              // only accepted if the tap really switched to listening
+  await wait(100)
+  check(stops() > stops0, 'question 2 ends the reading of answer 1')
   await wait(300)
   await shot('question-2-thinking')
   const read2 = await untilReading(2, 'answer-2-streaming')
@@ -159,7 +167,7 @@ for (const c of CASES) {
   const lead = answered.slice(0, 2).map((x) => (x.a.match(/^\s*/)[0].length))
   check(spoken.length >= 2 && [0, 1].every((i) => spoken[i] === answered[i].a.replace(/^\s+/, '')),
     `answers read in full, leading whitespace trimmed (raw answers started with ${lead.join(' / ')} whitespace chars)`)
-  check(JSON.stringify(asked) === JSON.stringify([q1, q2]), 'bridge got both questions (tap interrupted the reading): ' + JSON.stringify(asked))
+  check(JSON.stringify(asked) === JSON.stringify([q1, q2]), 'bridge got both questions (asked during the reading): ' + JSON.stringify(asked))
 
   const before = await shot('before-swipe')
   await key('ArrowUp'); await wait(800); const up = await shot('swipe-up')

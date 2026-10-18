@@ -57,7 +57,7 @@ test('UI strings and status chip follow the system language', () => {
   assert.equal(zh.data.chip, '就绪')
   zh._setStatus('speaking')
   assert.equal(zh.data.chip, '播报中')
-  assert.equal(zh.data.hint, '眼镜腿 tap = 打断并提问')
+  assert.equal(zh.data.hint, '眼镜腿 tap = 提问')
   const en = makePage({ lang: 'en-US' })
   assert.equal(en.data.chip, 'READY')
   en._setStatus('working')
@@ -471,7 +471,7 @@ test('readAloud=false: no speech, listening resumes', async () => {
 
 // ---------------- temple tap / recognizer lifecycle ----------------
 
-test('tap while reading stops the voice and listens immediately', async () => {
+test('tap while reading keeps the voice going and listens; the next question ends the reading', async () => {
   setTTS('synth', 2000)
   const p = makePage()
   net.queue.push({ body: sse('很长的回答') })
@@ -481,25 +481,112 @@ test('tap while reading stops the voice and listens immediately', async () => {
   await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
   tap(p)
   assert.equal(p.data.status, 'listening')
-  assert.equal(p._busy, false)
-  assert.ok(tts.log.includes('player.stop') && tts.log.includes('player.destroy'))
+  assert.ok(p._tts, 'still reading')
+  assert.ok(!tts.log.includes('player.stop'))
   assert.equal(recs.length, 1)            // same recognizer, not restarted
   assert.deepEqual(rec.calls, ['start'])
   net.queue.push({ body: sse('第二个回答') })
-  rec.emit('next')                        // a new question works right away (no mute after a tap)
+  rec.emit('nex', false)                  // the question streams in while the voice goes on
+  await sleep(10)
+  assert.ok(p._tts && !tts.log.includes('player.stop'))
+  assert.deepEqual(userLines(p), ['q', 'nex'])
+  rec.emit('next')                        // final: stops the reading, asks
+  assert.ok(tts.log.includes('player.stop'))
   await until(() => botLines(p).length === 2 && !p._busy)
   assert.deepEqual(userLines(p), ['q', 'next'])
+  assert.deepEqual(botLines(p), ['很长的回答', '第二个回答'])
 })
 
-test('tap while reading with speak() (no stop API) still switches to listening', async () => {
+test('without a tap, speech during reading is still ignored', async () => {
+  setTTS('synth', 300)
+  const p = makePage()
+  net.queue.push({ body: sse('很长的回答') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  lastRec().emit('something else entirely')
+  await until(idle(p))
+  assert.deepEqual(userLines(p), ['q'])
+  assert.equal(net.calls.length, 1)
+})
+
+test('tap while reading, then silence: reading finishes, then keeps listening', async () => {
+  setTTS('synth', 150)
+  const p = makePage()
+  net.queue.push({ body: sse('回答') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  tap(p)
+  await until(() => !p._tts && !p._busy)
+  assert.ok(!tts.log.includes('player.stop'), 'read to the end')
+  assert.equal(p.data.status, 'listening')
+  assert.equal(p._barge, false)
+})
+
+test('tap while reading: the mic hearing our own voice is ignored, a real question is not', async () => {
+  setTTS('synth', 2000)
+  const p = makePage()
+  net.queue.push({ body: sse('月球是地球唯一的天然卫星，距离地球大约三十八万公里。') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  tap(p)
+  lastRec().emit('地球唯一的天然卫星距离', false)
+  lastRec().emit('月球是地球唯一的天然卫星')
+  await sleep(20)
+  assert.ok(p._tts, 'still reading')
+  assert.deepEqual(userLines(p), ['q'])
+  net.queue.push({ body: sse('大约四十五亿年。') })
+  lastRec().emit('月球有多少岁了')
+  await until(() => botLines(p).length === 2 && !p._busy)
+  assert.deepEqual(userLines(p), ['q', '月球有多少岁了'])
+})
+
+test('tap while reading, then an exit word ends the conversation', async () => {
+  setTTS('synth', 2000)
+  const p = makePage()
+  net.queue.push({ body: sse('回答里也有停止两个字') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  tap(p)
+  lastRec().emit('停止')
+  await until(() => p.data.status === 'ready')
+  assert.ok(tts.log.includes('player.stop'))
+  assert.equal(p._rec, null)
+  assert.equal(net.calls.length, 1)
+})
+
+test('tap while reading with speak() (no stop API) listens, the question still works', async () => {
   setTTS('speak-noend')
   const p = makePage()
-  await (async () => { net.queue.push({ body: sse('回答') }); tap(p); lastRec().emit('q') })()
+  net.queue.push({ body: sse('回答') })
+  tap(p)
+  lastRec().emit('q')
   await until(() => p.data.status === 'speaking')
   tap(p)
   assert.equal(p.data.status, 'listening')
-  assert.equal(p._tts, null)
-  assert.equal(p._busy, false)
+  assert.ok(p._tts)
+  net.queue.push({ body: sse('第二个') })
+  lastRec().emit('next')
+  await until(() => botLines(p).length === 2)
+  assert.deepEqual(userLines(p), ['q', 'next'])
+})
+
+test('echo check compares neighbouring characters / words with the text being read', () => {
+  const p = makePage()
+  p._tts = { text: 'The Moon is Earth\'s only natural satellite. 月球是地球唯一的天然卫星。' }
+  assert.equal(p._isEcho('only natural satellite'), true)
+  assert.equal(p._isEcho('the moon is earths only'), false)   // "earths" ≠ "earth s"
+  assert.equal(p._isEcho('Moon is Earth'), true)
+  assert.equal(p._isEcho('how far is the moon'), false)
+  assert.equal(p._isEcho('地球唯一的天然卫星'), true)
+  assert.equal(p._isEcho('月球离地球多远'), false)
+  assert.equal(p._isEcho('月球'), true)                       // short: contained = echo
+  assert.equal(p._isEcho('火星'), false)
+  p._tts = null
+  assert.equal(p._isEcho('only natural satellite'), false)
 })
 
 test('tap while thinking is ignored', async () => {

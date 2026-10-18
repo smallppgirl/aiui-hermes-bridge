@@ -7,6 +7,7 @@ bridge over SSE and renders the streamed answer on the glasses HUD.
 - Real, working logic: **POST to your bridge → parse the SSE stream (`data: {...answer_stream...}`) → render the text live** on the glasses page.
 - Uses the official AIUI project shape (`app.json` / `app.js` / `pages/index/index.ink` + `config.js`), scaffolded from `@yodaos-pkg/aiui-agent`.
 - **Continuous conversation:** tap the temple (`GlobalHook`) or Enter once to begin, then it listens → asks the bridge → reads/render the answer → auto-listens for the next question, looping until you say `退出/停止/exit/stop` or press Backspace/Esc.
+- **Tap while reading (like the native assistant):** the voice keeps reading and the mic opens; the next question is printed as you speak and stops the reading once it is complete. While reading, recognized text that matches the answer being read (the mic hearing the speaker) is ignored.
 - **Dialog-style HUD (like the native Rokid assistant):** each new question is printed live on a new line below the previous answer (interim ASR), followed by `正在思考…` / `Thinking…`, which is replaced by the streamed answer. The screen is never cleared between turns (last 20 lines are kept).
 - **Reading scroll:** while an answer streams, the view follows it but keeps the question at the top; while it is read aloud, the text scrolls slowly with the estimated speech progress. ArrowUp/ArrowDown scroll manually.
 - **TTS voice follows the answer language:** a Chinese answer is read with the `zh` voice, an English answer with the `en` voice (`ttsVoices` in `config.js`), whatever the Hi Rokid UI language is. AIUI ignores `utterance.lang`; only the voice id selects the language. AIUI `SpeechRecognition.start()` needs a user gesture, so the first utterance needs a tap OR include the question in the wake phrase ("Hi Rokid, open hermes, <question>").
@@ -49,7 +50,7 @@ Runtime facts found this way (they differ from a browser):
   (`_current` card = 448×150, `_blank` full screen = 480×352).
 - `AudioPlayer.play()` is unavailable in the card (`_current`), so answers are read with
   `speechSynthesis.speak()` there (whose end event is not reported — listening resumes after
-  the estimated speaking time, or on a temple tap); full screen uses `synthesize()` + player.
+  the estimated speaking time, or when a new question is asked after a temple tap); full screen uses `synthesize()` + player.
 - Set `debug: true` in `config.js` to show speech-recognition events in the hint line.
 
 ## Notes

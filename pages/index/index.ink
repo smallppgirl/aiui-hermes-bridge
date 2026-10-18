@@ -445,7 +445,7 @@ export default {
       return this._setStatus('ready')
     }
     if (BRIDGE_CONFIG.readAloud !== false) {
-      // mic results ignored while reading aloud (TTS echo), unless a tap opened it
+      // speech while reading is ignored unless a tap asked for it (so talk nearby does not cut it off)
       if (!this._barge) this._setStatus('speaking')
       const interrupted = await (this._readP || this._speak())
       if (interrupted) return   // a new question took over

@@ -192,6 +192,18 @@ test('Backspace while thinking aborts the request without retry', async () => {
   assert.equal(p._rec, null)
 })
 
+test('debug: the hint shows the timing of the answer when its voice starts', async () => {
+  setTTS('synth', 300)
+  const p = makePage({ config: { debug: true } })
+  net.queue.push({ body: sse('回答。') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => tts.log.includes('play'))
+  assert.match(p.data.hint, /^text \d+\.\ds · answer \d+\.\ds · synth \d+\.\ds · audio \d+\.\ds · playing \d+\.\ds$/)
+  key(p, 'Backspace')
+  await until(() => !p._busy)
+})
+
 test('long answers are capped to the last 20000 characters', async () => {
   setTTS('synth')
   const p = makePage({ config: { readAloud: false } })

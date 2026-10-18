@@ -51,7 +51,9 @@ Runtime facts found this way (they differ from a browser):
 - `AudioPlayer.play()` is unavailable in the card (`_current`), so answers are read with
   `speechSynthesis.speak()` there (whose end event is not reported — listening resumes after
   the estimated speaking time, or when a new question is asked after a temple tap); full screen uses `synthesize()` + player.
-- Set `debug: true` in `config.js` to show speech-recognition events in the hint line.
+- Set `debug: true` in `config.js` to show speech-recognition events in the hint line, and the
+  timing of each answer when its voice starts, e.g. `text 4.2s · answer 8.5s · synth 8.6s · audio 9.4s · playing 9.4s`
+  (seconds from the end of the question; also logged to the console as `[tts] timing`).
 
 ## Notes
 - The bridges accept the Rokid/lingzhu-style body; extra fields are ignored. `take_photo` tool_calls

@@ -118,6 +118,7 @@ export default {
     try {
       const obj = JSON.parse(m[1])
       if (obj && obj.type === 'answer' && obj.answer_stream) {
+        if (!this._answer) this._mark('text')
         // Hermes answers often start with blank lines or a space: drop them (no indent, not read aloud)
         this._answer = (this._answer + obj.answer_stream).replace(/^\s+/, '').slice(-MAX_ANSWER)
         this._renderAnswer()
@@ -385,6 +386,19 @@ export default {
     if (BRIDGE_CONFIG.debug) this.setData({ hint: 'asr: ' + msg })
   },
 
+  // timing of one answer, from the question: first text, answer complete, speech
+  // requested, audio ready, playing. Logged (and shown with config debug) at each play.
+  _mark(name) {
+    if (name === 'question') this._marks = { t0: Date.now(), list: [] }
+    const m = this._marks
+    if (!m || (name === 'text' && m.text)) return
+    if (name === 'text') m.text = true
+    m.list.push(name + ' ' + ((Date.now() - m.t0) / 1000).toFixed(1) + 's')
+    if (name !== 'playing') return
+    console.log('[tts] timing', m.list.join(' · '))
+    if (BRIDGE_CONFIG.debug) this.setData({ hint: m.list.slice(1).join(' · ') })
+  },
+
   // after an answer: keep listening on the recognizer we own (a tap renews it)
   _resumeListening() {
     this._muteUntil = Date.now() + 700
@@ -396,10 +410,12 @@ export default {
     if ((this._busy && !this._barge) || !t) return
     if (this._barge) this._stopSpeaking()   // a question asked while reading ends the reading
     this._busy = true
+    this._mark('question')
     await this._commitUserTurn(t)
     if (this._isExit(t)) { this._endConversation(); return }
     const ok = await this.ask(t)
     const ans = this._answer
+    this._mark('answer')
     if (!ok || !ans) {
       // FAILED (error already shown by ask) — stop listening, keep the error visible
       this._busy = false
@@ -456,10 +472,13 @@ export default {
         arm(est * 1.1 + 1000)
         u.onend = u.onerror = () => tts.finish(false)
         this._startReadScroll(est)
+        this._mark('speak')
         try { speechSynthesis.speak(u) } catch (_) { tts.finish(false) }
+        this._mark('playing')
       }
       if (this._noPlayer || typeof speechSynthesis.synthesize !== 'function' || typeof SpeechAudioPlayer === 'undefined') return speakSimple()
       arm(est * 1.5 + 8000)   // safety net only; onEnded normally ends it
+      this._mark('synth')
       speechSynthesis.synthesize(u, { subtitles: 'sentence' }).then((task) => {
         if (this._tts !== tts) { try { task.abort() } catch (_) {} return }
         const player = (tts.player = new SpeechAudioPlayer(task, { trackMode: 'hidden' }))
@@ -474,7 +493,8 @@ export default {
         }
         player.audioPlayer.onCanplay(() => {
           if (this._tts !== tts || !tts.player) return
-          try { player.play() } catch (_) { fallback() }
+          this._mark('audio')
+          try { player.play(); this._mark('playing') } catch (_) { fallback() }
         })
         player.audioPlayer.onEnded(() => tts.finish(false))
         task.onerror = () => tts.finish(false)

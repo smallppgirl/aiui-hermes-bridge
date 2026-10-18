@@ -326,13 +326,16 @@ export default {
   // ---- continuous voice conversation (one tap, mic stays hot, no per-turn tap) ----
   // temple tap: (re)start listening. While reading, the voice keeps going (like the
   // native assistant) and the mic takes the next question, which then ends the reading.
-  // A tap is a user gesture, so the mic is always allowed to open here.
+  // The glasses cancel their own voice in the mic (measured with the echo probe on branch echo-probe), so
+  // nothing needs filtering. A tap is a user gesture, so the mic may always open here.
   captureAndAsk() {
-    this._muteUntil = 0   // a tap means "I'm about to speak": drop the TTS echo guard
     const rec = this._rec
     this._debug('tap rec=' + (!rec ? 'none' : rec._ended ? 'ended' : 'live') + (this._tts ? ' reading' : ''))
     if (this._tts) {
       this._barge = true
+      // a fresh recognizer: the one from the question may have stopped hearing during
+      // a long answer without reporting it
+      this._dropRec('abort')
       this._startListening()
       return this._setStatus(this._rec ? 'listening' : 'speaking')
     }
@@ -365,20 +368,12 @@ export default {
     rec.continuous = true
     rec.interimResults = true
     rec.onresult = (e) => {
-      if (rec._retired) return                         // a recognizer we stopped
-      if (Date.now() < (this._muteUntil || 0)) return  // tail of our own TTS
+      if (rec._retired) return   // a recognizer we stopped
       const results = e.results || []
       let interim = ''
-      const echo = this._echoText()
       for (let i = e.resultIndex; i < results.length; i++) {
-        let t = results[i] && results[i][0] && results[i][0].transcript
+        const t = results[i] && results[i][0] && results[i][0].transcript
         if (!t) continue
-        if (echo && !this._isExit(t)) {
-          const kept = this._stripEcho(t, echo)
-          if (kept !== t) this._debug('echo ' + t.length + '→' + kept.length + (kept ? ' ' + kept : ''))
-          if (!kept) continue
-          t = kept
-        }
         this._debug((results[i].isFinal ? 'final ' : 'interim ') + t)
         if (results[i].isFinal) this._handleUtterance(t)
         else interim += t
@@ -419,11 +414,9 @@ export default {
     if (BRIDGE_CONFIG.debug) this.setData({ hint: m.list.slice(1).join(' · ') })
   },
 
-  // after an answer: keep listening on the recognizer we own (a tap renews it).
-  // Speech right after the voice stops is its echo, unless a tap during the reading
-  // said a question is coming: then the echo check (_echoText) covers that moment.
+  // after an answer: keep listening on the recognizer we own (a tap renews it; its
+  // end event is no sign it stopped: the glasses report end early and keep going)
   _resumeListening() {
-    this._muteUntil = Date.now() < (this._echoUntil || 0) ? 0 : Date.now() + 700
     this._setStatus(this._rec ? 'listening' : 'ready')
   },
 
@@ -479,19 +472,15 @@ export default {
   _speak() {
     const zh = this._isChinese(this._full)   // the first sentences decide the voice
     const voices = BRIDGE_CONFIG.ttsVoices || {}
-    const page = this
     this._ttsProgress = null
     return new Promise((resolve) => {
       let timer = null
       let pos = 0   // read up to here in this._full
       const tts = {
-        get text() { return page._full },   // for the echo check
         more: null,                         // set while waiting for more streamed text
         finish: (interrupted) => {
           if (this._tts !== tts) return
           this._tts = this._ttsProgress = null
-          // tapped while reading: the question may arrive mixed with the end of the voice
-          if (this._barge) { this._lastRead = page._full; this._echoUntil = Date.now() + 3000 }
           this._barge = false
           if (timer) clearTimeout(timer)
           resolve(!!interrupted)
@@ -610,46 +599,6 @@ export default {
     this._stopReadScroll()
     console.log('[tts] stop')
     tts.finish(interrupted)
-  },
-
-  // the text the mic may be hearing from the speaker: the answer being read, and for a
-  // moment after a reading that was tapped (see _resumeListening)
-  _echoText() {
-    if (this._tts) return this._tts.text
-    return Date.now() < (this._echoUntil || 0) ? this._lastRead : ''
-  },
-
-  // While reading with the mic open, the recognizer hears the speaker and the user in one
-  // transcript. Drop the parts that repeat the answer (4+ neighbouring Han characters or
-  // 3+ words that also follow each other there; a question may share a short phrase with
-  // the answer) and keep the longest other stretch:
-  // the question. '' = only echo, the text itself = no echo.
-  _stripEcho(text, answer) {
-    const re = /[㐀-鿿豈-﫿]|[a-z0-9]+/g
-    const t = []
-    for (let m; (m = re.exec((text || '').toLowerCase()));) t.push({ u: m[0], start: m.index, end: m.index + m[0].length })
-    const a = (answer || '').toLowerCase().match(re) || []
-    if (!t.length || !a.length) return text
-    if (t.length < 3) return (' ' + a.join(' ') + ' ').includes(' ' + t.map((x) => x.u).join(' ') + ' ') ? '' : text
-    const pairs = new Set(a.slice(1).map((u, i) => a[i] + ' ' + u))
-    const echo = t.map(() => false)
-    for (let i = 1, run = 0; i < t.length; i++) {
-      run = pairs.has(t[i - 1].u + ' ' + t[i].u) ? run + 1 : 0
-      const word = t.slice(i - run, i + 1).some((x) => x.u.length > 1)
-      if (run >= (word ? 2 : 3)) for (let k = i - run; k <= i; k++) echo[k] = true
-    }
-    if (!echo.includes(true)) return text
-    let best = null
-    for (let i = 0; i < t.length;) {
-      if (echo[i]) { i++; continue }
-      let j = i
-      while (j + 1 < t.length && !echo[j + 1]) j++
-      if (!best || j - i > best[1] - best[0]) best = [i, j]
-      i = j + 1
-    }
-    if (!best || best[1] - best[0] < 1) return ''   // a single leftover unit is noise
-    // keep punctuation at the very start / end of the transcript
-    return text.slice(best[0] ? t[best[0]].start : 0, best[1] < t.length - 1 ? t[best[1]].end : text.length).trim()
   },
 
   // Chinese if Han characters make up a meaningful share of the text

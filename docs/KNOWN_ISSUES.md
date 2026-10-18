@@ -32,8 +32,15 @@ main (bd72f17)
 **`tap-keeps-reading`**
 - Temple tap while reading keeps the voice going (like the native assistant) and
   opens the mic; the next question streams in and ends the reading once complete.
-- While the mic is open during reading, text matching the answer being read is
-  ignored (the mic hearing the speaker). Exit words always work.
+
+**`asr-during-reading` → `fresh-mic-on-tap`** (the probe is a side branch, `echo-probe`)
+- Measured on the glasses with the echo probe agent (branch `echo-probe`, 2026-10-18): with the mic open while
+  the glasses read a sentence, 0% of it was recognized; a line spoken over the voice was
+  recognized 100%. The hardware cancels its own voice, so the agent does no echo
+  filtering and has no echo guard after reading.
+- A tap during reading opens a fresh recognizer (the one from the question may have
+  stopped hearing during a long answer without reporting it).
+- With `debug: true` the hint shows the last 3 recognizer events.
 
 **`tts-timing-and-sentences`**
 - Timing log: with `debug: true` the hint shows `text · answer · synth · audio · playing`
@@ -72,20 +79,13 @@ main (bd72f17)
 7. **Timing** — with `debug: true`, ask for a long answer and note the timing line.
    A big gap between `synth` and `audio` is the glasses' speech engine. Are the gaps
    between sentence segments audible?
-8. **Tap while reading does not really listen** (seen on the glasses with
-   `tap-keeps-reading`). Branch `asr-during-reading` changes two likely causes: the mic
-   hears the voice and the user in one transcript, which the echo check used to drop
-   whole (now only the parts repeating the answer are dropped, the question is kept); and
-   the 0.7 s echo guard after reading swallowed a question that arrived as the voice
-   stopped (now off when you tapped during the reading). Still to find out with
-   `debug: true` (the hint shows the last 3 recognizer events): does the recognizer
-   deliver anything while the voice plays (`interim …` / `echo …`), or does it end
-   (`end`, then `tap rec=ended`)?
+8. **Tap while reading** — with `fresh-mic-on-tap`: tap during a long answer and ask.
+   If it still doesn't hear you, note the debug hint (`tap rec=…`, `start`, `interim …`).
 9. **ASR session lifecycle** — after a tap, stay silent 20–30 s, then speak: still heard?
 10. **Card ↔ full screen** — ask in the card, switch to full screen, ask again: right layout,
     and does `synthesize()` (and sentence-by-sentence reading) take over?
-11. **Echo guard (0.7 s after reading ends)** — speak right after an answer ends without a
-    tap: does it hear its own voice, or drop your first words?
+11. **Without a tap after reading** — speak right after an answer ends: heard? After a long
+    answer the old recognizer may have stopped; a new one can only open on a tap.
 12. **Long answer** — ask for a very long answer: does it stream and scroll smoothly?
 
 ## Ideas

@@ -9,7 +9,6 @@ const idle = (p) => () => !p._busy && (p.data.status === 'listening' || p.data.s
 async function askOnce(p, q, answer = '好的。') {
   net.queue.push({ body: sse(answer) })
   if (!p._rec) tap(p)
-  p._muteUntil = 0   // skip the post-reading echo guard (tested separately)
   lastRec().emit(q)
   await until(idle(p))
 }
@@ -599,14 +598,16 @@ test('tap while reading keeps the voice going and listens; the next question end
   assert.equal(p.data.status, 'listening')
   assert.ok(p._tts, 'still reading')
   assert.ok(!tts.log.includes('player.stop'))
-  assert.equal(recs.length, 1)            // same recognizer, not restarted
-  assert.deepEqual(rec.calls, ['start'])
+  assert.equal(recs.length, 2)            // a fresh recognizer...
+  assert.deepEqual(rec.calls, ['start', 'abort'])
+  rec.emit('stale')                       // ...the old one is ignored
+  const rec2 = lastRec()
   net.queue.push({ body: sse('第二个回答') })
-  rec.emit('nex', false)                  // the question streams in while the voice goes on
+  rec2.emit('nex', false)                 // the question streams in while the voice goes on
   await sleep(10)
   assert.ok(p._tts && !tts.log.includes('player.stop'))
   assert.deepEqual(userLines(p), ['q', 'nex'])
-  rec.emit('next')                        // final: stops the reading, asks
+  rec2.emit('next')                       // final: stops the reading, asks
   assert.ok(tts.log.includes('player.stop'))
   await until(() => botLines(p).length === 2 && !p._busy)
   assert.deepEqual(userLines(p), ['q', 'next'])
@@ -640,55 +641,16 @@ test('tap while reading, then silence: reading finishes, then keeps listening', 
   assert.equal(p._barge, false)
 })
 
-test('tap while reading: the mic hearing our own voice is ignored, a real question is not', async () => {
-  setTTS('synth', 2000)
-  const p = makePage()
-  net.queue.push({ body: sse('月球是地球唯一的天然卫星，距离地球大约三十八万公里。') })
-  tap(p)
-  lastRec().emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  tap(p)
-  lastRec().emit('地球唯一的天然卫星距离', false)
-  lastRec().emit('月球是地球唯一的天然卫星')
-  await sleep(20)
-  assert.ok(p._tts, 'still reading')
-  assert.deepEqual(userLines(p), ['q'])
-  net.queue.push({ body: sse('大约四十五亿年。') })
-  lastRec().emit('月球有多少岁了')
-  await until(() => botLines(p).length === 2 && !p._busy)
-  assert.deepEqual(userLines(p), ['q', '月球有多少岁了'])
-})
-
-test('tap while reading: a transcript mixing the voice and a question asks just the question', async () => {
-  setTTS('synth', 2000)
-  const p = makePage()
-  net.queue.push({ body: sse('月球是地球唯一的天然卫星，距离地球大约三十八万公里。') })
-  tap(p)
-  lastRec().emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  tap(p)
-  lastRec().emit('月球是地球唯一的天然卫星月球有', false)
-  await sleep(10)
-  assert.deepEqual(userLines(p), ['q', '月球有'])
-  net.queue.push({ body: sse('答。') })
-  lastRec().emit('月球是地球唯一的天然卫星月球有多大')
-  await until(() => botLines(p).length === 2 && !p._busy)
-  assert.deepEqual(userLines(p), ['q', '月球有多大'])
-  assert.equal(net.calls[1].body.message[0].text, '月球有多大')
-})
-
-test('tapped during reading: a question right after the voice ends is not swallowed', async () => {
+test('a question right after the voice ends is used (the glasses cancel their own voice)', async () => {
   setTTS('synth', 150)
   const p = makePage()
   net.queue.push({ body: sse('月球是地球唯一的天然卫星。') })
   tap(p)
   lastRec().emit('q')
   await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  tap(p)
-  await until(() => !p._busy)                    // read to the end, no question yet
-  assert.equal(p._muteUntil, 0)
+  await until(() => !p._busy)                    // read to the end
   net.queue.push({ body: sse('答。') })
-  lastRec().emit('天然卫星月球有多大')           // the recognizer finalizes once the voice stops
+  lastRec().emit('月球有多大')                   // right away, no tap
   await until(() => botLines(p).length === 2 && !p._busy)
   assert.deepEqual(userLines(p), ['q', '月球有多大'])
 })
@@ -701,11 +663,12 @@ test('debug: the hint shows the last three recognizer events', async () => {
   lastRec().emit('q')
   await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
   tap(p)
-  lastRec().emit('地球唯一的天然卫星', false)
+  lastRec().emit('月球有多', false)
   const parts = p.data.hint.split(' | ')
   assert.equal(parts.length, 3)
-  assert.match(parts[1], /tap rec=live reading$/)
-  assert.match(parts[2], /echo 9→0$/)
+  assert.match(parts[0], /tap rec=live reading$/)
+  assert.match(parts[1], / start$/)
+  assert.match(parts[2], /interim 月球有多$/)
   key(p, 'Backspace')
   await until(() => !p._busy)
 })
@@ -741,26 +704,6 @@ test('tap while reading with speak() (no stop API) listens, the question still w
   assert.deepEqual(userLines(p), ['q', 'next'])
 })
 
-test('echo strip: drops parts that repeat the answer, keeps the question', () => {
-  const p = makePage()
-  const ans = 'The Moon is Earth\'s only natural satellite. 月球是地球唯一的天然卫星，距离地球大约三十八万公里。'
-  const strip = (t) => p._stripEcho(t, ans)
-  assert.equal(strip('only natural satellite'), '')
-  assert.equal(strip('Moon is Earth'), '')
-  assert.equal(strip('how far is the moon'), 'how far is the moon')
-  assert.equal(strip('地球唯一的天然卫星'), '')
-  assert.equal(strip('月球离地球多远'), '月球离地球多远')       // shares a short phrase only
-  assert.equal(strip('月球'), '')                              // short: contained = echo
-  assert.equal(strip('火星'), '火星')
-  // the speaker and the user in one transcript
-  assert.equal(strip('月球是地球唯一的天然卫星月球有多大'), '月球有多大')
-  assert.equal(strip('火星有多远距离地球大约三十八万公里'), '火星有多远')
-  assert.equal(strip('the moon is earth s only natural satellite how old is it'), 'how old is it')
-  assert.equal(strip('唯一的天然卫星啊距离地球大约'), '')          // one leftover unit = noise
-  assert.equal(strip('天然卫星，距离地球 How old is it?'), 'How old is it?')
-  assert.equal(p._stripEcho('anything', ''), 'anything')
-})
-
 test('tap while thinking is ignored', async () => {
   setTTS('synth')
   const p = makePage()
@@ -773,35 +716,6 @@ test('tap while thinking is ignored', async () => {
   assert.equal(p.data.status, 'working')
   key(p, 'Backspace')
   await until(() => !p._busy)
-})
-
-test('echo guard: speech right after reading is ignored, later speech is used', async () => {
-  setTTS('synth', 20)
-  const p = makePage()
-  await askOnce(p, 'q1', '回答一')
-  lastRec().emit('TTS echo tail')
-  await sleep(20)
-  assert.deepEqual(userLines(p), ['q1'])
-  await sleep(720)
-  net.queue.push({ body: sse('回答二') })
-  lastRec().emit('q2')
-  await until(() => botLines(p).length === 2 && !p._busy)
-  assert.deepEqual(userLines(p), ['q1', 'q2'])
-})
-
-test('a tap right after reading ends cancels the echo guard', async () => {
-  setTTS('synth', 20)
-  const p = makePage()
-  net.queue.push({ body: sse('回答一') })
-  tap(p)
-  lastRec().emit('q1')
-  await until(idle(p))
-  assert.ok(p._muteUntil > Date.now(), 'echo guard active after reading')
-  tap(p)
-  net.queue.push({ body: sse('回答二') })
-  lastRec().emit('q2')   // within the guard window, but after a tap
-  await until(() => botLines(p).length === 2 && !p._busy)
-  assert.deepEqual(userLines(p), ['q1', 'q2'])
 })
 
 test('error event (e.g. no-speech) does not stop listening or drop results', async () => {

@@ -150,11 +150,11 @@ for (const c of CASES) {
   await say(q2.slice(0, 5), false)
   await wait(300)
   await shot('question-2-live')
-  // the glasses mic hears the voice too: question 2 arrives mixed with answer 1's text
-  const echo = zh ? ans1.replace(/\s+/g, '').slice(10, 30) : ans1.split(/\s+/).slice(3, 10).join(' ')
-  await say(echo + ' ' + q2)  // only accepted if the tap really switched to listening
+  const sessions = await pg.evaluate(() => __asr.sessions.length)
+  await say(q2)              // only accepted if the tap really switched to listening
   await wait(100)
   check(stops() > stops0, 'question 2 ends the reading of answer 1')
+  check(sessions >= 2, `the tap during reading opened a fresh mic session (${sessions} sessions)`)
   await wait(300)
   await shot('question-2-thinking')
   const read2 = await untilReading(tts1, 'answer-2-streaming')

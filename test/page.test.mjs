@@ -192,13 +192,24 @@ test('Backspace while thinking aborts the request without retry', async () => {
   assert.equal(p._rec, null)
 })
 
-test('long answers are capped to the last 4000 characters', async () => {
+test('long answers are capped to the last 20000 characters', async () => {
   setTTS('synth')
   const p = makePage({ config: { readAloud: false } })
-  const long = 'a'.repeat(3000) + 'b'.repeat(2000)
+  const long = 'a'.repeat(15000) + 'b'.repeat(10000)
   await askOnce(p, 'q', long)
-  assert.equal(botLines(p)[0].length, 4000)
-  assert.equal(botLines(p)[0], long.slice(-4000))
+  assert.equal(botLines(p)[0].length, 20000)
+  assert.equal(botLines(p)[0], long.slice(-20000))
+})
+
+test('leading blank lines and spaces of an answer are dropped, inner ones kept', async () => {
+  setTTS('synth')
+  const p = makePage()
+  net.queue.push({ chunks: [sse('\n\n').trim() + '\n\n', sse(' ', ' 你好').trim() + '\n\n', sse('\n\n世界').trim() + '\n\n'] })
+  tap(p)
+  lastRec().emit('问题')
+  await until(() => tts.utterances.length === 1)
+  assert.equal(botLines(p)[0], '你好\n\n世界')
+  assert.equal(tts.utterances[0].text, '你好\n\n世界')
 })
 
 test('dialog keeps at most 20 lines, newest last', async () => {

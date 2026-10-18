@@ -8,7 +8,7 @@
 import { BRIDGE_CONFIG, buildPayload } from '../../config.js'
 
 const MAX_TURNS = 20      // keep the on-screen dialog bounded
-const MAX_ANSWER = 4000   // cap a single answer's displayed text
+const MAX_ANSWER = 20000  // cap a single answer's displayed text
 const HAN = /[㐀-鿿豈-﫿]/g
 const count = (s, re) => ((s || '').match(re) || []).length
 
@@ -118,7 +118,8 @@ export default {
     try {
       const obj = JSON.parse(m[1])
       if (obj && obj.type === 'answer' && obj.answer_stream) {
-        this._answer = (this._answer + obj.answer_stream).slice(-MAX_ANSWER)
+        // Hermes answers often start with blank lines or a space: drop them (no indent, not read aloud)
+        this._answer = (this._answer + obj.answer_stream).replace(/^\s+/, '').slice(-MAX_ANSWER)
         this._renderAnswer()
       }
     } catch (e) { /* ignore */ }

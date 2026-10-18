@@ -1,15 +1,18 @@
 # Status and known issues
 
-As of 2026-10-18. `main` and the glasses are at `bd72f17`. The work below is on three
-stacked branches (each starts from the previous one); `tts-timing-and-sentences`
-contains all of it. 76 unit tests, the fake e2e and the live e2e (`npm run e2e -- --live`)
-pass on that branch.
+As of 2026-10-18. `main` and the glasses are at `bd72f17`. The work below is on stacked
+branches (each starts from the previous one); `fresh-mic-on-tap` contains all of it except
+the test agent. 74 unit tests and the fake e2e pass on it; the live e2e
+(`npm run e2e -- --live`) last passed on `tts-timing-and-sentences`.
 
 ```
 main (bd72f17)
  └─ answer-trim-and-limit
      └─ tap-keeps-reading
          └─ tts-timing-and-sentences
+             └─ asr-during-reading
+                 ├─ fresh-mic-on-tap   ← deploy this one
+                 └─ echo-probe         (test agent only, tools/echo-probe)
 ```
 
 ## Done
@@ -24,7 +27,8 @@ main (bd72f17)
 
 **`answer-trim-and-limit`**
 - A temple swipe during or after reading is no longer pulled back to the end.
-- A tap cancels the 0.7 s echo guard after reading.
+- A tap cancels the 0.7 s echo guard after reading (the guard is gone altogether in
+  `fresh-mic-on-tap`).
 - Leading blank lines / spaces of Hermes answers are trimmed (no indent, not read aloud).
 - Answer cap raised from 4000 to 20000 characters.
 - Live-bridge e2e set (`npm run e2e -- --live`, never run by default).
@@ -32,6 +36,14 @@ main (bd72f17)
 **`tap-keeps-reading`**
 - Temple tap while reading keeps the voice going (like the native assistant) and
   opens the mic; the next question streams in and ends the reading once complete.
+
+**`tts-timing-and-sentences`**
+- Timing log: with `debug: true` the hint shows `text · answer · synth · audio · playing`
+  in seconds from the question (also `[tts] timing` in the console).
+- Full screen reads sentence by sentence while the answer streams: the voice starts
+  after the first sentence instead of after the whole answer (live e2e: ~0.1 s after
+  the first text). The bridge streams in small pieces of a few characters.
+- A new question while an answer still streams stops that request and keeps its text.
 
 **`asr-during-reading` → `fresh-mic-on-tap`** (the probe is a side branch, `echo-probe`)
 - Measured on the glasses with the echo probe agent (branch `echo-probe`, 2026-10-18): with the mic open while
@@ -41,14 +53,6 @@ main (bd72f17)
 - A tap during reading opens a fresh recognizer (the one from the question may have
   stopped hearing during a long answer without reporting it).
 - With `debug: true` the hint shows the last 3 recognizer events.
-
-**`tts-timing-and-sentences`**
-- Timing log: with `debug: true` the hint shows `text · answer · synth · audio · playing`
-  in seconds from the question (also `[tts] timing` in the console).
-- Full screen reads sentence by sentence while the answer streams: the voice starts
-  after the first sentence instead of after the whole answer (live e2e: ~0.1 s after
-  the first text). The bridge streams in small pieces of a few characters.
-- A new question while an answer still streams stops that request and keeps its text.
 
 ## Not fixed
 

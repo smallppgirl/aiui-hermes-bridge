@@ -9,9 +9,10 @@ import { createRequire } from 'node:module'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
+const appRoot = process.env.E2E_APP_ROOT ? join(root, process.env.E2E_APP_ROOT) : root   // another agent, e.g. tools/echo-probe
 const ink = dirname(createRequire(import.meta.url).resolve('@yodaos-pkg/ink/package.json'))
 const types = { '.js': 'text/javascript', '.wasm': 'application/wasm', '.html': 'text/html', '.json': 'application/json' }
-const skip = /^(\.git|node_modules|test|e2e|docs)(\/|$)/
+const skip = /^(\.git|node_modules|test|e2e|docs|tools)(\/|$)/
 const walk = (d) => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]))
 const BRIDGE_URL = /^(\s*url:\s*")([^"]+)(")/m
 
@@ -20,9 +21,9 @@ export const bridgeUrl = () => process.env.E2E_BRIDGE_URL || readFileSync(join(r
 
 // the agent as the glasses get it
 function bundle(live, origin) {
-  const files = walk(root).map((f) => relative(root, f)).filter((f) => !skip.test(f) && (live || f !== 'secrets.js'))
+  const files = walk(appRoot).map((f) => relative(appRoot, f)).filter((f) => !skip.test(f) && (live || f !== 'secrets.js'))
     .map((path) => {
-      let data = readFileSync(join(root, path))
+      let data = readFileSync(join(appRoot, path))
       if (live && path === 'config.js') data = Buffer.from(data.toString('utf8').replace(BRIDGE_URL, `$1${origin}/bridge$3`))
       return { path, base64: data.toString('base64') }
     })

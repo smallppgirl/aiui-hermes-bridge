@@ -7,3 +7,4 @@ e2e/out/
 e2e/out-live/
 .DS_Store
 e2e/out-probe/
+*.aix

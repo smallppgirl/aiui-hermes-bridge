@@ -36,6 +36,11 @@ bridge over SSE and renders the streamed answer on the glasses HUD.
   a fake bridge answers; it covers full screen (`_blank`) and the card in the conversation flow
   (`_current`), Chinese and English. Screenshots of every step land in `e2e/out/`.
   First time: `npm install && npx playwright install chromium`.
+- `npm run e2e -- --live` — the same cases against the **real bridge** in `config.js` with the
+  real AK from `secrets.js`: real Hermes answers (a long one that needs scrolling, then a short
+  one in the other language — 8 questions in total, so it costs tokens; never run by default).
+  Run one case with e.g. `npm run e2e -- --live zh-CN-synth_blank`. Screenshots: `e2e/out-live/`.
+  `E2E_BRIDGE_URL=<url>` points the live run at another bridge or a local stub.
 - `test/` and `e2e/` are excluded from the `.aix` package via `.aixignore`.
 
 Runtime facts found this way (they differ from a browser):

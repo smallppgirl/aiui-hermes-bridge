@@ -4,3 +4,5 @@ node_modules/
 .venv/
 secrets.js
 e2e/out/
+e2e/out-live/
+.DS_Store

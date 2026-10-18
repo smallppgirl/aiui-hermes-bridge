@@ -519,6 +519,21 @@ test('echo guard: speech right after reading is ignored, later speech is used', 
   assert.deepEqual(userLines(p), ['q1', 'q2'])
 })
 
+test('a tap right after reading ends cancels the echo guard', async () => {
+  setTTS('synth', 20)
+  const p = makePage()
+  net.queue.push({ body: sse('回答一') })
+  tap(p)
+  lastRec().emit('q1')
+  await until(idle(p))
+  assert.ok(p._muteUntil > Date.now(), 'echo guard active after reading')
+  tap(p)
+  net.queue.push({ body: sse('回答二') })
+  lastRec().emit('q2')   // within the guard window, but after a tap
+  await until(() => botLines(p).length === 2 && !p._busy)
+  assert.deepEqual(userLines(p), ['q1', 'q2'])
+})
+
 test('error event (e.g. no-speech) does not stop listening or drop results', async () => {
   setTTS('synth', 20)
   const p = makePage()
@@ -699,6 +714,33 @@ for (const mode of ['entity', 'binding']) {
     assert.equal(p._reading, false, 'swipe pauses the reading auto-scroll')
   })
 }
+
+test('a temple swipe is respected: reading end / streaming do not yank the view back', async () => {
+  setTTS('synth', 300)
+  const p = makePage({ scroll: 'entity' })
+  net.queue.push({ body: sse('长'.repeat(400)) })
+  tap(p)
+  lastRec().emit('q1')
+  await until(() => p.data.status === 'speaking')
+  p._stopReadScroll()
+  p._scrollTo(p.sv.scrollHeight, false)
+  await sleep(10)
+  key(p, 'ArrowUp')
+  await sleep(10)
+  const pos = p.sv.scrollTop
+  assert.ok(pos < p.sv.scrollHeight - p.sv.clientHeight)
+  await until(idle(p))                   // reading ends
+  await sleep(100)
+  assert.equal(p.sv.scrollTop, pos, 'stays where the user swiped')
+  p._muteUntil = 0
+  net.queue.push({ hang: true })
+  lastRec().emit('q2')                   // a new question follows again
+  await until(() => p.data.status === 'working')
+  await sleep(100)
+  assert.ok(p.sv.scrollTop > pos, 'new question scrolls into view')
+  key(p, 'Backspace')
+  await until(() => !p._busy)
+})
 
 test('[binding] scroll-top always changes so the runtime re-applies it', () => {
   const p = makePage()

@@ -167,6 +167,7 @@ export default {
       }
       // where this Q&A starts: streaming/reading never scrolls the question off the top
       this._stopReadScroll()   // a new question ends the previous answer's reading scroll
+      this._userScrolled = false
       this._turnStart = turns.length ? this._contentHeight() : 0
       await this._set({ turns: turns.concat([{ id, role: 'user', text }]) })
       this._follow()
@@ -256,7 +257,7 @@ export default {
   },
 
   _followNow() {
-    if (this._reading) return
+    if (this._reading || this._userScrolled) return
     const m = this._metrics()
     if (!m) return this._scrollTo(1)   // size unknown yet: a 1px nudge reports it via bindscroll
     let top = this._maxTop(m)
@@ -265,6 +266,7 @@ export default {
   },
 
   _scrollToEnd() {
+    if (this._userScrolled) return   // the user swiped back to read: leave the view there
     const m = this._metrics()
     this._scrollTo(m ? m.height : 1000000, true)
   },
@@ -272,6 +274,7 @@ export default {
   // temple swipe (ArrowUp / ArrowDown): scroll by ~60% of a screen
   _scrollPage(dir) {
     this._stopReadScroll()
+    this._userScrolled = true   // until the next question
     const m = this._metrics()
     if (!m) return this._scrollTo((this.data.scrollTop > 100000 ? 0 : this.data.scrollTop) + dir * 150, true)
     const step = m.client > 0 ? m.client * 0.6 : 150
@@ -313,6 +316,7 @@ export default {
   // temple tap: while reading = stop reading and listen now; otherwise (re)start
   // listening. A tap is a user gesture, so the mic is always allowed to open here.
   captureAndAsk() {
+    this._muteUntil = 0   // a tap means "I'm about to speak": drop the TTS echo guard
     if (this._tts) {
       this._stopSpeaking()
       this._busy = false

@@ -29,8 +29,11 @@ export default {
   // returns true if an answer was received and rendered, false otherwise.
   async ask(text, imageDataUrl) {
     if (!text && !imageDataUrl) return false
-    const botId = (this._botId = this._nextId())
-    this._answer = ''
+    // a newer question while the last answer still streams: keep what it has shown
+    if (this._botId && this._answer) this._patchTurn(this._botId, { text: this._answer, pending: false })
+    const botId = (this._botId = this._askId = this._nextId())
+    this._answer = this._full = ''
+    this._answerDone = false
     this._setStatus('working')
     await this._set({ turns: this.data.turns.concat([{ id: botId, role: 'bot', text: '', pending: true }]) })
     this._follow()
@@ -54,7 +57,7 @@ export default {
         const feed = (chunk) => {
           buffer += chunk.replace(/\r/g, '')   // before splitting, so \r\n\r\n also ends an event
           for (let i; (i = buffer.indexOf('\n\n')) >= 0; buffer = buffer.slice(i + 2)) {
-            this._consumeSse(buffer.slice(0, i))
+            if (this._askId === botId) this._consumeSse(buffer.slice(0, i))   // not after a newer question
           }
         }
         if (resp.body && typeof resp.body.getReader === 'function') {
@@ -66,25 +69,27 @@ export default {
         }
         if (!this._answer) throw new Error('未收到回复（桥返回空）')
         await this._flushAnswer()
-        this._botId = null
+        if (this._botId === botId) this._botId = null
         return true
       } catch (e) {
         if (attempt < 2 && e && e.name !== 'AbortError' && !this._stopped) {
           // transient network timeout — retry once, from a clean answer line
-          this._answer = ''
+          this._answer = this._full = ''
+          if (this._readP) { this._stopSpeaking(false); this._readP = null }
           await this._patchTurn(botId, { text: '', pending: true })
           await new Promise((r) => setTimeout(r, 500))
           continue
         }
         const msg = (e && e.name === 'AbortError') ? '（已停止）' : ('（' + (e && e.message || e) + '）')
-        this._botId = null
-        await this._patchTurn(botId, { text: (this._answer ? this._answer + '\n' : '') + msg, pending: false })
-        this._setStatus('ready')
-        this._follow()
+        const text = this._askId === botId ? this._answer : (this.data.turns.find((t) => t.id === botId) || {}).text
+        if (this._botId === botId) this._botId = null
+        await this._patchTurn(botId, { text: (text ? text + '\n' : '') + msg, pending: false })
+        if (this._askId === botId) { this._setStatus('ready'); this._follow() }
         return false
       } finally {
         clearTimeout(timer)
-        this._abort = null
+        if (this._abort === ctrl) this._abort = null
+        if (this._askId === botId) { this._answerDone = true; this._readMore() }
       }
     }
     return false
@@ -120,8 +125,12 @@ export default {
       if (obj && obj.type === 'answer' && obj.answer_stream) {
         if (!this._answer) this._mark('text')
         // Hermes answers often start with blank lines or a space: drop them (no indent, not read aloud)
-        this._answer = (this._answer + obj.answer_stream).replace(/^\s+/, '').slice(-MAX_ANSWER)
+        this._full = (this._full + obj.answer_stream).replace(/^\s+/, '')
+        this._answer = this._full.slice(-MAX_ANSWER)
         this._renderAnswer()
+        // read aloud while it streams, from the first complete sentence on
+        if (this._liveRead && !this._readP && this._sentenceEnd(this._full, 0) > 0) this._readP = this._speak()
+        this._readMore()
       }
     } catch (e) { /* ignore */ }
   },
@@ -409,50 +418,62 @@ export default {
     const t = (text || '').trim()
     if ((this._busy && !this._barge) || !t) return
     if (this._barge) this._stopSpeaking()   // a question asked while reading ends the reading
+    const turn = (this._turn = (this._turn || 0) + 1)
     this._busy = true
+    this._readP = null
     this._mark('question')
     await this._commitUserTurn(t)
     if (this._isExit(t)) { this._endConversation(); return }
+    // full screen reads sentence by sentence while the answer streams; speak() at the end
+    this._liveRead = BRIDGE_CONFIG.readAloud !== false && this._canPlay()
     const ok = await this.ask(t)
+    this._liveRead = false
+    if (turn !== this._turn) return   // a newer question took over while this one streamed
     const ans = this._answer
     this._mark('answer')
     if (!ok || !ans) {
       // FAILED (error already shown by ask) — stop listening, keep the error visible
+      this._stopSpeaking(false)
       this._busy = false
       this._dropRec('stop')
       return this._setStatus('ready')
     }
-    const zh = this._isChinese(ans)
     if (BRIDGE_CONFIG.readAloud !== false) {
       // mic results ignored while reading aloud (TTS echo), unless a tap opened it
-      this._setStatus('speaking')
-      const interrupted = await this._speak(ans, zh)
+      if (!this._barge) this._setStatus('speaking')
+      const interrupted = await (this._readP || this._speak())
       if (interrupted) return   // a new question took over
       this._stopReadScroll()
       if (!this._draftId) this._turnStart = null   // keep it for a question being spoken
       this._scrollToEnd()
     } else {
-      this._startReadScroll(this._estimateSpeechMs(ans, zh) * 0.7)
+      this._startReadScroll(this._estimateSpeechMs(ans, this._isChinese(ans)) * 0.7)
       this._turnStart = null
     }
     this._busy = false
     this._resumeListening()
   },
 
-  // Read the answer aloud. Resolves true if interrupted by a tap, false when done.
+  // Read the answer (this._full) aloud. Resolves true if interrupted, false when done.
   // The voice follows the language of the answer, not the system language
   // (AIUI ignores utterance.lang; only the voice id selects the language).
   // Prefers synthesize() + SpeechAudioPlayer: it can be stopped, reports when
-  // playback really ends, and gives subtitle positions to pace the scrolling.
-  // speak() has no stop and its end event may never fire, so it is the fallback.
-  _speak(text, zh) {
-    const est = this._estimateSpeechMs(text, zh)
+  // playback really ends, and gives subtitle positions to pace the scrolling. It reads
+  // in segments while the answer streams: each one is every complete sentence not read
+  // yet, so the voice starts after the first sentence instead of after the whole answer.
+  // speak() has no stop and its end event may never fire, so it is the fallback: it
+  // reads the rest of the answer in one go once the answer is complete.
+  _speak() {
+    const zh = this._isChinese(this._full)   // the first sentences decide the voice
     const voices = BRIDGE_CONFIG.ttsVoices || {}
+    const page = this
     this._ttsProgress = null
     return new Promise((resolve) => {
       let timer = null
+      let pos = 0   // read up to here in this._full
       const tts = {
-        text,
+        get text() { return page._full },   // for the echo check
+        more: null,                         // set while waiting for more streamed text
         finish: (interrupted) => {
           if (this._tts !== tts) return
           this._tts = this._ttsProgress = null
@@ -464,11 +485,21 @@ export default {
       this._tts = tts
       if (typeof speechSynthesis === 'undefined' || typeof SpeechSynthesisUtterance === 'undefined') return tts.finish(false)
       const arm = (ms) => { if (timer) clearTimeout(timer); timer = setTimeout(() => this._stopSpeaking(false), Math.min(300000, ms)) }
-      const u = new SpeechSynthesisUtterance(text)
-      u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
-      u.lang = zh ? 'zh-CN' : 'en-US'
+      const utterance = (text) => {
+        const u = new SpeechSynthesisUtterance(text)
+        u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
+        u.lang = zh ? 'zh-CN' : 'en-US'
+        return u
+      }
+      const readScroll = () => { if (!this._reading) this._startReadScroll(this._estimateSpeechMs(this._full.slice(pos), zh)) }
       const speakSimple = () => {
         if (this._tts !== tts) return
+        if (!this._answerDone) { tts.more = speakSimple; return }
+        tts.more = null
+        const text = this._full.slice(pos)
+        pos = this._full.length
+        const est = this._estimateSpeechMs(text, zh)
+        const u = utterance(text)
         arm(est * 1.1 + 1000)
         u.onend = u.onerror = () => tts.finish(false)
         this._startReadScroll(est)
@@ -476,41 +507,81 @@ export default {
         try { speechSynthesis.speak(u) } catch (_) { tts.finish(false) }
         this._mark('playing')
       }
-      if (this._noPlayer || typeof speechSynthesis.synthesize !== 'function' || typeof SpeechAudioPlayer === 'undefined') return speakSimple()
-      arm(est * 1.5 + 8000)   // safety net only; onEnded normally ends it
-      this._mark('synth')
-      speechSynthesis.synthesize(u, { subtitles: 'sentence' }).then((task) => {
-        if (this._tts !== tts) { try { task.abort() } catch (_) {} return }
-        const player = (tts.player = new SpeechAudioPlayer(task, { trackMode: 'hidden' }))
-        tts.task = task
-        // AudioPlayer.play() is unavailable in the card (_current) target: fall back to speak()
-        const fallback = () => {
-          this._noPlayer = true   // until the target changes
-          try { task.abort() } catch (_) {}
-          try { player.destroy() } catch (_) {}
-          tts.player = tts.task = null
-          speakSimple()
+      // the next segment, or wait for more text, or done
+      const next = () => {
+        if (this._tts !== tts) return
+        tts.more = null
+        const end = this._answerDone ? this._full.length : this._sentenceEnd(this._full, pos)
+        if (end <= pos) {
+          if (this._answerDone) return tts.finish(false)
+          tts.more = next
+          return
         }
-        player.audioPlayer.onCanplay(() => {
-          if (this._tts !== tts || !tts.player) return
-          this._mark('audio')
-          try { player.play(); this._mark('playing') } catch (_) { fallback() }
-        })
-        player.audioPlayer.onEnded(() => tts.finish(false))
-        task.onerror = () => tts.finish(false)
-        // generation done: the real length is known, so tighten the safety net
-        task.onend = (e) => {
-          if (this._tts === tts && tts.player && e && e.duration > 0) arm((e.duration - (player.currentTime || 0)) * 1000 + 2000)
-        }
-        player.textTrack.addEventListener('cuechange', () => {
-          const cue = player.textTrack.activeCues.item(0)
-          if (cue && Number.isInteger(cue.charIndex)) {
-            this._ttsProgress = (cue.charIndex + (cue.charLength || 0) / 2) / Math.max(1, text.length)
+        const start = pos
+        const text = this._full.slice(start, end)
+        pos = end
+        if (!text.trim()) return next()
+        arm(this._estimateSpeechMs(text, zh) * 1.5 + 8000)   // safety net only; onEnded normally ends it
+        this._mark('synth')
+        speechSynthesis.synthesize(utterance(text), { subtitles: 'sentence' }).then((task) => {
+          if (this._tts !== tts) { try { task.abort() } catch (_) {} return }
+          const player = (tts.player = new SpeechAudioPlayer(task, { trackMode: 'hidden' }))
+          tts.task = task
+          const done = () => {
+            try { player.destroy() } catch (_) {}
+            if (tts.player === player) tts.player = tts.task = null
           }
-        })
-        this._startReadScroll(est)
-      }).catch(speakSimple)
+          // AudioPlayer.play() is unavailable in the card (_current) target: fall back to speak()
+          const fallback = () => {
+            this._noPlayer = true   // until the target changes
+            try { task.abort() } catch (_) {}
+            done()
+            pos = start
+            speakSimple()
+          }
+          player.audioPlayer.onCanplay(() => {
+            if (this._tts !== tts || tts.player !== player) return
+            this._mark('audio')
+            try { player.play(); this._mark('playing') } catch (_) { return fallback() }
+            readScroll()
+          })
+          player.audioPlayer.onEnded(() => { if (tts.player === player) { done(); next() } })
+          task.onerror = () => { if (tts.player === player) { done(); next() } }
+          // generation done: the real length is known, so tighten the safety net
+          task.onend = (e) => {
+            if (tts.player === player && e && e.duration > 0) arm((e.duration - (player.currentTime || 0)) * 1000 + 2000)
+          }
+          player.textTrack.addEventListener('cuechange', () => {
+            const cue = player.textTrack.activeCues.item(0)
+            if (tts.player === player && cue && Number.isInteger(cue.charIndex)) {
+              this._ttsProgress = (start + cue.charIndex + (cue.charLength || 0) / 2) / Math.max(1, this._full.length)
+            }
+          })
+        }).catch(() => { pos = start; speakSimple() })
+      }
+      if (!this._canPlay()) return speakSimple()
+      next()
     })
+  },
+
+  // synthesize() + SpeechAudioPlayer available (not in the card, see _speak)
+  _canPlay() {
+    return !this._noPlayer && typeof speechSynthesis !== 'undefined' &&
+      typeof speechSynthesis.synthesize === 'function' && typeof SpeechAudioPlayer !== 'undefined'
+  },
+
+  // more streamed text (or its end) for a reading that is waiting for it
+  _readMore() {
+    if (this._tts && this._tts.more) this._tts.more()
+  },
+
+  // end of the last complete sentence after `from` (or `from` if there is none yet)
+  _sentenceEnd(text, from) {
+    const re = /(?:[。！？!?；…]+|[.;](?=\s)|\n)["'”’」』）)]*/g
+    re.lastIndex = from
+    let end = from
+    for (let m; (m = re.exec(text));) end = m.index + m[0].length
+    return end
   },
 
   // stop reading aloud now (interrupted = true when the user tapped)

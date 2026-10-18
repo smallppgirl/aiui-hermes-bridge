@@ -199,7 +199,7 @@ test('debug: the hint shows the timing of the answer when its voice starts', asy
   tap(p)
   lastRec().emit('q')
   await until(() => tts.log.includes('play'))
-  assert.match(p.data.hint, /^text \d+\.\ds · answer \d+\.\ds · synth \d+\.\ds · audio \d+\.\ds · playing \d+\.\ds$/)
+  assert.match(p.data.hint, /^text \d+\.\ds · (answer \d+\.\ds · )?synth \d+\.\ds · (answer \d+\.\ds · )?audio \d+\.\ds · playing \d+\.\ds$/)
   key(p, 'Backspace')
   await until(() => !p._busy)
 })
@@ -219,9 +219,9 @@ test('leading blank lines and spaces of an answer are dropped, inner ones kept',
   net.queue.push({ chunks: [sse('\n\n').trim() + '\n\n', sse(' ', ' 你好').trim() + '\n\n', sse('\n\n世界').trim() + '\n\n'] })
   tap(p)
   lastRec().emit('问题')
-  await until(() => tts.utterances.length === 1)
+  await until(idle(p))
   assert.equal(botLines(p)[0], '你好\n\n世界')
-  assert.equal(tts.utterances[0].text, '你好\n\n世界')
+  assert.equal(tts.utterances.map((u) => u.text).join(''), '你好\n\n世界')
 })
 
 test('dialog keeps at most 20 lines, newest last', async () => {
@@ -399,10 +399,114 @@ test('synthesize path: plays after canplay, back to listening on end', async () 
   await until(() => p.data.status === 'speaking')
   assert.equal(p.data.chip, '播报中')
   await until(idle(p))
-  assert.deepEqual(tts.log, ['synth:female-yujie', 'play'])
+  assert.deepEqual(tts.log, ['synth:female-yujie', 'play', 'player.destroy'])
   assert.equal(p.data.status, 'listening')
   assert.equal(recs.length, 1)   // same recognizer kept
   assert.equal(p._tts, null)
+})
+
+// ---------------- reading while the answer streams ----------------
+
+const texts = () => tts.utterances.map((u) => u.text)
+const slow = (...parts) => ({ chunks: parts.map((x) => sse(x).trim() + '\n\n'), chunkDelay: 60 })
+
+test('sentence end: Chinese/English punctuation and line breaks, not decimals or a bare dot', () => {
+  const p = makePage()
+  assert.equal(p._sentenceEnd('第一句。第二', 0), 4)
+  assert.equal(p._sentenceEnd('第一句。第二句！第三', 0), 8)
+  assert.equal(p._sentenceEnd('他说：“好。”然后', 0), 7)
+  assert.equal(p._sentenceEnd('Pi is 3.14 and', 0), 0)
+  assert.equal(p._sentenceEnd('It ends here.', 0), 0)          // could still be "here.5": wait
+  assert.equal(p._sentenceEnd('It ends here. Next', 0), 13)
+  assert.equal(p._sentenceEnd('Really? Yes', 0), 7)
+  assert.equal(p._sentenceEnd('段落一\n段落二', 0), 4)
+  assert.equal(p._sentenceEnd('第一句。第二句。', 4), 8)
+  assert.equal(p._sentenceEnd('第一句。第二', 4), 4)
+})
+
+test('full screen: reading starts at the first sentence, before the answer is complete', async () => {
+  setTTS('synth', 30)
+  const p = makePage()
+  net.queue.push(slow('第一句', '话。第二', '句话。', '第三句话。'))
+  tap(p)
+  lastRec().emit('q')
+  await until(() => tts.log.includes('play'))
+  assert.equal(texts()[0], '第一句话。')
+  assert.ok(!p._answerDone, 'still streaming')
+  await until(idle(p))
+  assert.equal(texts().join(''), '第一句话。第二句话。第三句话。')
+  assert.ok(texts().length >= 2)
+  assert.deepEqual(botLines(p), ['第一句话。第二句话。第三句话。'])
+  assert.equal(p.data.status, 'listening')
+})
+
+test('a reading that caught up waits for more text, and reads the unfinished end once complete', async () => {
+  setTTS('synth', 10)
+  const p = makePage()
+  net.queue.push({ chunks: slow('第一句。', '第二', '句没有句号').chunks, chunkDelay: 120 })
+  tap(p)
+  lastRec().emit('q')
+  await until(idle(p), 5000)
+  assert.deepEqual(texts(), ['第一句。', '第二句没有句号'])
+})
+
+test('the first sentences decide the voice for the whole answer', async () => {
+  setTTS('synth', 10)
+  const p = makePage()
+  net.queue.push(slow('Hello there. ', '接下来全是中文的内容。', '还有更多中文。'))
+  tap(p)
+  lastRec().emit('q')
+  await until(idle(p), 5000)
+  assert.ok(tts.log.filter((l) => l.startsWith('synth:')).every((l) => l === 'synth:English_radiant_girl'))
+})
+
+test('card target: speak() reads the whole answer once it is complete', async () => {
+  setTTS('speak', 20)
+  const p = makePage()
+  p.onTargetChanged('_current')
+  net.queue.push(slow('第一句。', '第二句。'))
+  tap(p)
+  lastRec().emit('q')
+  await until(idle(p), 5000)
+  assert.deepEqual(texts(), ['第一句。第二句。'])
+})
+
+test('tap + new question while the answer still streams: the old request stops, the new one is read', async () => {
+  setTTS('synth', 2000)
+  const p = makePage()
+  net.queue.push({ chunks: slow('第一句话。', '还在', '继续', '流式', '输出', '中。').chunks, chunkDelay: 150 })
+  tap(p)
+  lastRec().emit('q1')
+  await until(() => tts.log.includes('play'))
+  assert.ok(!p._answerDone)
+  tap(p)
+  assert.equal(p.data.status, 'listening')
+  net.queue.push({ body: sse('新的回答。') })
+  lastRec().emit('q2')
+  await until(() => botLines(p).length === 2 && texts().includes('新的回答。'))
+  await sleep(400)                                  // the old stream would have gone on
+  assert.deepEqual(userLines(p), ['q1', 'q2'])
+  assert.match(botLines(p)[0], /^第一句话。.*（已停止）$/s)
+  assert.equal(botLines(p)[1], '新的回答。')
+  assert.equal(p.data.status, 'speaking')
+  assert.ok(p._busy)
+  key(p, 'Backspace')
+  await until(() => !p._busy)
+})
+
+test('the request fails after reading started: the reading stops, the error is shown', async () => {
+  setTTS('synth', 2000)
+  const p = makePage()
+  net.queue.push({ chunks: [sse('第一句话。').trim() + '\n\n', 'data: {"type":"error"'], chunkDelay: 50 })
+  // the fake stream ends without an error, so make the read fail instead
+  tap(p)
+  lastRec().emit('q')
+  await until(() => tts.log.includes('play'))
+  p._abort.abort()
+  await until(() => !p._busy)
+  assert.ok(tts.log.includes('player.stop'))
+  assert.equal(p.data.status, 'ready')
+  assert.match(botLines(p)[0], /第一句话。\n（已停止）/)
 })
 
 test('synthesize fails: falls back to speak()', async () => {

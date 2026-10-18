@@ -89,10 +89,10 @@ for (const c of CASES) {
   const key = (code) => pg.evaluate((k) => __key(k), code)
   const hostLog = () => pg.evaluate(() => window.__log.slice())
   const ttsCount = async () => (await hostLog()).filter((l) => / voice=/.test(l)).length
-  // wait until the k-th answer is being read aloud (live answers can take a while)
-  const untilReading = async (k, step) => {
+  // wait until a speech request after the first `from` ones (live answers can take a while)
+  const untilReading = async (from, step) => {
     const t0 = Date.now()
-    for (let i = 0; (await ttsCount()) < k; i++) {
+    for (let i = 0; (await ttsCount()) <= from; i++) {
       if (Date.now() - t0 > (LIVE ? 180000 : 15000)) return false
       if (LIVE && i % 6 === 5) await shot(`${step}-${Math.round((Date.now() - t0) / 1000)}s`)   // streaming progress
       await wait(500)
@@ -123,7 +123,7 @@ for (const c of CASES) {
   await say(q1)
   await wait(400)
   await shot('question-thinking')
-  const read1 = await untilReading(1, 'answer-streaming')
+  const read1 = await untilReading(0, 'answer-streaming')
   const reading0 = await shot('answer-reading')
   // reading scroll follows the speech; speak() is paced by the estimate, so allow time
   let reading1 = reading0
@@ -145,6 +145,7 @@ for (const c of CASES) {
   await wait(800)
   await shot('tap-listening')
   check(stops() === stops0, 'temple tap keeps the voice reading')
+  const tts1 = await ttsCount()   // speech requests of answer 1 (one per segment)
   answers.push({ text: a2, delay: 500 })
   await say(q2.slice(0, 5), false)
   await wait(300)
@@ -154,7 +155,7 @@ for (const c of CASES) {
   check(stops() > stops0, 'question 2 ends the reading of answer 1')
   await wait(300)
   await shot('question-2-thinking')
-  const read2 = await untilReading(2, 'answer-2-streaming')
+  const read2 = await untilReading(tts1, 'answer-2-streaming')
   await wait(1200)
   await shot('answer-2')
   const ans2 = (answered[1] && answered[1].a) || ''
@@ -162,11 +163,18 @@ for (const c of CASES) {
   const voices = (await hostLog()).filter((l) => / voice=/.test(l))
   const voice2 = isChinese(ans2) ? 'female-yujie' : 'English_radiant_girl'
   check(voices.length >= 2 && voices.at(-1).includes('voice=' + voice2), `answer 2 voice follows its language (${voice2}): ${voices.at(-1)}`)
-  // what is shown/read = the whole answer without its leading blank lines/spaces
+  // read = the answer without its leading blank lines/spaces, in segments while it streams;
+  // answer 1 up to where question 2 stopped it, answer 2 in full
   const spoken = await pg.evaluate(() => window.__tts.map((r) => r.text))
+  const [s1, s2] = [spoken.slice(0, tts1).join(''), spoken.slice(tts1).join('')]
+  const [t1, t2] = answered.slice(0, 2).map((x) => x.a.replace(/^\s+/, ''))
   const lead = answered.slice(0, 2).map((x) => (x.a.match(/^\s*/)[0].length))
-  check(spoken.length >= 2 && [0, 1].every((i) => spoken[i] === answered[i].a.replace(/^\s+/, '')),
-    `answers read in full, leading whitespace trimmed (raw answers started with ${lead.join(' / ')} whitespace chars)`)
+  check(s1.length > 0 && t1.startsWith(s1) && s2 === t2,
+    `answers read from the start, leading whitespace trimmed (raw answers started with ${lead.join(' / ')} whitespace chars)`)
+  if (c.tts === 'synth' && c.target === '_blank') {
+    const first = spoken[0] || ''
+    check(first.length < t1.length || t1.length < 40, `full screen starts reading answer 1 before it is complete (first segment ${first.length} of ${t1.length} chars, ${tts1} segment(s) read)`)
+  }
   check(JSON.stringify(asked) === JSON.stringify([q1, q2]), 'bridge got both questions (asked during the reading): ' + JSON.stringify(asked))
 
   const before = await shot('before-swipe')
@@ -175,6 +183,7 @@ for (const c of CASES) {
   check(!before.equals(up) && !up.equals(down), 'temple swipe scrolls the dialog up and back down')
   check(errors.length === 0, 'no runtime errors' + (errors.length ? ': ' + errors.slice(0, 3).join(' | ') : ''))
   console.log(name + '\n' + checks.join('\n'))
+  if (LIVE) console.log(trace.filter((l) => l.includes('timing')).map((l) => '    ' + l.replace(/^\S+ /, '')).join('\n'))
   if (caseFailed) console.log('  trace:\n    ' + trace.concat((await hostLog()).map((l) => 'host ' + l)).join('\n    '))
   await ctx.close()
 }

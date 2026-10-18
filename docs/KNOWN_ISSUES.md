@@ -47,12 +47,13 @@ and the live e2e (`npm run e2e -- --live`) all pass.
 
 ## Reading starts late
 
-11. **The voice starts only after the whole answer has arrived.** Text shows as Hermes
-    streams it, but `_speak()` runs after `ask()` finishes, plus the TTS start-up time.
-    For a long answer that is several seconds of text on screen before the voice starts.
-    Fix idea: read sentence by sentence while the answer streams (queue each finished
-    sentence to `synthesize()`). Works in full screen; in card mode `speak()` reports no
-    end, so sentences can't be chained reliably there.
+11. ~~The voice starts only after the whole answer has arrived~~ — on branch
+    `tts-timing-and-sentences`, full screen reads sentence by sentence while the answer
+    streams (live e2e: voice ~0.1 s after the first text instead of after the whole answer).
+    Card mode still reads with `speak()` once the answer is complete.
+    Check on the glasses with `debug: true`: the hint shows e.g.
+    `text 1.4s · synth 1.5s · audio 1.6s · playing 1.6s`. A big gap between `synth` and
+    `audio` is the glasses' speech engine; gaps between segments may be audible.
 
 ## Not on the glasses yet
 

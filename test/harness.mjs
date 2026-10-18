@@ -117,8 +117,12 @@ setGlobal('fetch', async (url, opts) => {
   if (r.chunks) {
     const enc = new TextEncoder()
     const chunks = r.chunks.slice()
-    resp.body = { getReader: () => ({ read: async () => (chunks.length
-      ? { done: false, value: enc.encode(chunks.shift()) } : { done: true }) }) }
+    // chunkDelay: ms between chunks (a slow stream); an abort rejects the pending read
+    resp.body = { getReader: () => ({ read: async () => {
+      if (r.chunkDelay) await sleep(r.chunkDelay)
+      if (opts.signal && opts.signal.aborted) throw new DOMException('aborted', 'AbortError')
+      return chunks.length ? { done: false, value: enc.encode(chunks.shift()) } : { done: true }
+    } }) }
   }
   return resp
 })

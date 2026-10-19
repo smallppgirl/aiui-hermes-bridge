@@ -786,7 +786,7 @@ test('debug: recognizer events shown in the hint line', async () => {
   assert.match(p.data.hint, /tap none \| .* #1 start \| .* #1 speechstart \| .* #1 error network$/)
   lastRec().onend()
   assert.match(p.data.hint, / #1 start \| .* #1 speechstart \| .* #1 error network \| .* #1 end$/)
-  const off = makePage()
+  const off = makePage({ config: { debug: false } })
   tap(off)
   assert.equal(off.data.hint, '正在听 · 说完即可')
 })

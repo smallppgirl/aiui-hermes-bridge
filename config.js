@@ -29,7 +29,7 @@ export const BRIDGE_CONFIG = {
   ttsVoices: { zh: 'female-yujie', en: 'English_radiant_girl' },
   // true = show speech-recognition events (start / interim / final / error / end)
   // in the hint line, to diagnose listening problems on the glasses.
-  debug: false,
+  debug: true,   // on for the asr-diagnostics test; set back to false before merging
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.

@@ -11,7 +11,8 @@ main (bd72f17)
      └─ tap-keeps-reading
          └─ tts-timing-and-sentences
              └─ asr-during-reading
-                 ├─ fresh-mic-on-tap   ← deploy this one
+                 ├─ fresh-mic-on-tap
+                 │   └─ asr-diagnostics   ← deploy this one (debug log for item 8)
                  └─ echo-probe         (test agent only, tools/echo-probe)
 ```
 
@@ -83,8 +84,16 @@ main (bd72f17)
 7. **Timing** — with `debug: true`, ask for a long answer and note the timing line.
    A big gap between `synth` and `audio` is the glasses' speech engine. Are the gaps
    between sentence segments audible?
-8. **Tap while reading** — with `fresh-mic-on-tap`: tap during a long answer and ask.
-   If it still doesn't hear you, note the debug hint (`tap rec=…`, `start`, `interim …`).
+8. **Tap while reading — still deaf at times (2026-10-20, `fresh-mic-on-tap`).** After a
+   tap during a long answer the screen says listening, but for 15–20 s (and sometimes until
+   the reading ends, or after it) nothing is heard; a second tap fixes it. The AIUI docs say
+   `end` means the recognition session is over, while the agent assumes the glasses report
+   `end` early and keep listening (seen once on the device). Suspect: the recognizer is
+   really ended, perhaps when the next sentence segment starts playing. Branch
+   `asr-diagnostics` logs it: with `debug: true` the hint shows the last 4 events, with
+   seconds since the tap, the recognizer number (`#2 start`, `#2 audiostart`,
+   `#2 speechstart`, `#2 interim …`, `#2 end`) and the voice segments (`voice 77` = a
+   segment of 77 characters starts, `voice end`). Note what it shows when it is deaf.
 9. **ASR session lifecycle** — after a tap, stay silent 20–30 s, then speak: still heard?
 10. **Card ↔ full screen** — ask in the card, switch to full screen, ask again: right layout,
     and does `synthesize()` (and sentence-by-sentence reading) take over?

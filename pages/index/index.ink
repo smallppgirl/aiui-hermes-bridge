@@ -330,7 +330,8 @@ export default {
   // nothing needs filtering. A tap is a user gesture, so the mic may always open here.
   captureAndAsk() {
     const rec = this._rec
-    this._debug('tap rec=' + (!rec ? 'none' : rec._ended ? 'ended' : 'live') + (this._tts ? ' reading' : ''))
+    this._tapAt = Date.now()
+    this._debug('tap ' + (!rec ? 'none' : rec._ended ? 'ended' : 'live') + (this._tts ? ' reading' : ''))
     if (this._tts) {
       this._barge = true
       // a fresh recognizer: the one from the question may have stopped hearing during
@@ -364,27 +365,31 @@ export default {
     }
     if (!this._busy) this._setStatus('listening')
     const rec = (this._rec = new SpeechRecognition())
+    rec._n = this._recN = (this._recN || 0) + 1
+    const log = (msg) => this._debug('#' + rec._n + ' ' + msg)
     rec.lang = this._asrLang || BRIDGE_CONFIG.lang
     rec.continuous = true
     rec.interimResults = true
     rec.onresult = (e) => {
-      if (rec._retired) return   // a recognizer we stopped
       const results = e.results || []
       let interim = ''
       for (let i = e.resultIndex; i < results.length; i++) {
         const t = results[i] && results[i][0] && results[i][0].transcript
         if (!t) continue
-        this._debug((results[i].isFinal ? 'final ' : 'interim ') + t)
+        log((rec._retired ? 'old ' : '') + (results[i].isFinal ? 'final ' : 'interim ') + t)
+        if (rec._retired) continue   // a recognizer we stopped
         if (results[i].isFinal) this._handleUtterance(t)
         else interim += t
       }
       if (interim) this._onInterim(interim)
     }
-    rec.onerror = (e) => this._debug('error ' + (e && (e.error || e.message)))
-    rec.onend = () => { rec._ended = true; this._debug('end') }
+    rec.onerror = (e) => log('error ' + (e && (e.error || e.message)))
+    rec.onend = () => { rec._ended = true; log('end') }
+    // the rest only for the debug log: when the mic and the speech detector work
+    for (const ev of ['audiostart', 'speechstart', 'speechend', 'audioend', 'nomatch']) rec['on' + ev] = () => log(ev)
     try {
       rec.start()
-      this._debug('start')
+      log('start')
     } catch (e) {
       this._rec = null
       if (!this._busy) this._setStatus('ready')
@@ -392,12 +397,13 @@ export default {
     }
   },
 
-  // config debug: show the last recognizer events in the hint line (and the console)
+  // config debug: show the last recognizer (#n) and voice events in the hint line, with
+  // the seconds since the last tap (all events go to the console)
   _debug(msg) {
-    console.log('[asr]', msg)
+    const at = this._tapAt ? ((Date.now() - this._tapAt) / 1000).toFixed(1) : '-'
+    console.log('[asr]', at, msg)
     if (!BRIDGE_CONFIG.debug) return
-    const at = ((Date.now() / 1000) % 100).toFixed(1)
-    this._dbg = (this._dbg || []).concat(at + ' ' + (msg.length > 24 ? msg.slice(0, 24) + '…' : msg)).slice(-3)
+    this._dbg = (this._dbg || []).concat(at + ' ' + (msg.length > 18 ? msg.slice(0, 18) + '…' : msg)).slice(-4)
     this.setData({ hint: this._dbg.join(' | ') })
   },
 
@@ -527,6 +533,7 @@ export default {
         if (!text.trim()) return next()
         arm(this._estimateSpeechMs(text, zh) * 1.5 + 8000)   // safety net only; onEnded normally ends it
         this._mark('synth')
+        this._debug('voice ' + text.length)
         speechSynthesis.synthesize(utterance(text), { subtitles: 'sentence' }).then((task) => {
           if (this._tts !== tts) { try { task.abort() } catch (_) {} return }
           const player = (tts.player = new SpeechAudioPlayer(task, { trackMode: 'hidden' }))
@@ -549,7 +556,7 @@ export default {
             try { player.play(); this._mark('playing') } catch (_) { return fallback() }
             readScroll()
           })
-          player.audioPlayer.onEnded(() => { if (tts.player === player) { done(); next() } })
+          player.audioPlayer.onEnded(() => { if (tts.player === player) { this._debug('voice end'); done(); next() } })
           task.onerror = () => { if (tts.player === player) { done(); next() } }
           // generation done: the real length is known, so tighten the safety net
           task.onend = (e) => {
@@ -629,11 +636,12 @@ export default {
 
   _setStatus(status, extra) {
     const s = this.data.strings || {}
-    const [chip, hint] = {
+    let [chip, hint] = {
       listening: [s.chipListening, s.hintListening],
       working: [s.chipThinking, s.hintWorking],
       speaking: [s.chipSpeaking, s.hintSpeaking],
     }[status] || [s.chipReady, s.hintIdle]
+    if (BRIDGE_CONFIG.debug && this._dbg) hint = this._dbg.join(' | ')   // keep the debug log on screen
     this.setData(Object.assign({ status, chip, hint }, extra))
   },
 

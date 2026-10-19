@@ -52,7 +52,8 @@ Runtime facts found this way (they differ from a browser):
 - `AudioPlayer.play()` is unavailable in the card (`_current`), so answers are read with
   `speechSynthesis.speak()` there (whose end event is not reported — listening resumes after
   the estimated speaking time, or when a new question is asked after a temple tap); full screen uses `synthesize()` + player.
-- Set `debug: true` in `config.js` to show speech-recognition events in the hint line, and the
+- Set `debug: true` in `config.js` to show the last speech-recognition and voice events in the hint line
+  (seconds since the tap, recognizer number: `3.2 #2 speechstart`, `voice 77` / `voice end` per read segment), and the
   timing of each answer when its voice starts, e.g. `text 4.2s · answer 8.5s · synth 8.6s · audio 9.4s · playing 9.4s`
   (seconds from the end of the question; also logged to the console as `[tts] timing`).
 

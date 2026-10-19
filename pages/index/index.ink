@@ -98,6 +98,7 @@ export default {
   // stop the in-flight request, recognizer, speech and scrolling
   _teardown() {
     this._stopped = true
+    this._waitRec = null
     this._dropRec('abort')
     if (this._abort) this._abort.abort()
     this._stopSpeaking(false)
@@ -334,13 +335,35 @@ export default {
     this._debug('tap ' + (!rec ? 'none' : rec._ended ? 'ended' : 'live') + (this._tts ? ' reading' : ''))
     if (this._tts) {
       this._barge = true
+      if (this._waitRec) return   // a fresh recognizer is already on its way
       // a fresh recognizer: the one from the question may have stopped hearing during
-      // a long answer without reporting it
+      // a long answer without reporting it. The old one releases the mic only when it
+      // ends (~0.4 s on the glasses); one started before that hears nothing.
+      const old = this._rec
       this._dropRec('abort')
-      this._startListening()
-      return this._setStatus(this._rec ? 'listening' : 'speaking')
+      this._afterEnd(old, () => {
+        if (this._stopped) return
+        this._startListening()
+        if (!this._rec) this._setStatus(this._tts ? 'speaking' : 'ready')
+      })
+      return this._setStatus('listening')
     }
     if (!this._busy) this._startListening()   // still thinking: ignore
+  },
+
+  // run fn once rec has ended (or after 1.5 s if it never reports it)
+  _afterEnd(rec, fn) {
+    if (!rec || rec._ended) return fn()
+    this._waitRec = rec
+    let timer = null
+    const go = () => {
+      if (this._waitRec !== rec) return
+      this._waitRec = null
+      clearTimeout(timer)
+      fn()
+    }
+    rec._onEnded = go
+    timer = setTimeout(() => { this._debug('#' + rec._n + ' no end'); go() }, 1500)
   },
 
   // retire the recognizer we own: we stopped it, so ignore anything it still sends
@@ -384,7 +407,7 @@ export default {
       if (interim) this._onInterim(interim)
     }
     rec.onerror = (e) => log('error ' + (e && (e.error || e.message)))
-    rec.onend = () => { rec._ended = true; log('end') }
+    rec.onend = () => { rec._ended = true; log('end'); if (rec._onEnded) rec._onEnded() }
     // the rest only for the debug log: when the mic and the speech detector work
     for (const ev of ['audiostart', 'speechstart', 'speechend', 'audioend', 'nomatch']) rec['on' + ev] = () => log(ev)
     try {

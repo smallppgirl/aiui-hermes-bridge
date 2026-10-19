@@ -12,7 +12,8 @@ main (bd72f17)
          └─ tts-timing-and-sentences
              └─ asr-during-reading
                  ├─ fresh-mic-on-tap
-                 │   └─ asr-diagnostics   ← deploy this one (debug log for item 8)
+                 │   └─ asr-diagnostics   (debug log for item 8, debug on)
+                 │       └─ mic-handover  ← deploy this one
                  └─ echo-probe         (test agent only, tools/echo-probe)
 ```
 
@@ -94,6 +95,14 @@ main (bd72f17)
    seconds since the tap, the recognizer number (`#2 start`, `#2 audiostart`,
    `#2 speechstart`, `#2 interim …`, `#2 end`) and the voice segments (`voice 77` = a
    segment of 77 characters starts, `voice end`). Note what it shows when it is deaf.
+
+   **Found (photo, 2026-10-20):** `0.0 #10 start | 0.4 #9 error network | 0.4 #9 audioend |
+   0.4 #9 end`, then nothing from `#10`. The aborted recognizer releases the mic only when it
+   ends, 0.4 s after the tap; the new one was started before that and heard nothing (the
+   same as "请讲… never processes" while the echo probe held the mic). **Fix on
+   `mic-handover`:** the new recognizer starts when the old one has ended (at most 1.5 s).
+   To check: does `#n start` still work 0.4 s after the tap (`start failed` would mean the
+   glasses want it inside the tap itself)? Then `#n audiostart` / `interim …` when you speak.
 9. **ASR session lifecycle** — after a tap, stay silent 20–30 s, then speak: still heard?
 10. **Card ↔ full screen** — ask in the card, switch to full screen, ask again: right layout,
     and does `synthesize()` (and sentence-by-sentence reading) take over?

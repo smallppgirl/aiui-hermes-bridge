@@ -5,6 +5,8 @@ import {
   tap, key, sleep, until, userLines, botLines,
 } from './harness.mjs'
 
+// a tap while reading: the fresh recognizer opens once the old one has ended
+const tapReading = async (p) => { const n = recs.length; tap(p); await until(() => recs.length > n) }
 const idle = (p) => () => !p._busy && (p.data.status === 'listening' || p.data.status === 'ready')
 async function askOnce(p, q, answer = '好的。') {
   net.queue.push({ body: sse(answer) })
@@ -478,7 +480,7 @@ test('tap + new question while the answer still streams: the old request stops, 
   lastRec().emit('q1')
   await until(() => tts.log.includes('play'))
   assert.ok(!p._answerDone)
-  tap(p)
+  await tapReading(p)
   assert.equal(p.data.status, 'listening')
   net.queue.push({ body: sse('新的回答。') })
   lastRec().emit('q2')
@@ -598,7 +600,8 @@ test('tap while reading keeps the voice going and listens; the next question end
   assert.equal(p.data.status, 'listening')
   assert.ok(p._tts, 'still reading')
   assert.ok(!tts.log.includes('player.stop'))
-  assert.equal(recs.length, 2)            // a fresh recognizer...
+  assert.equal(recs.length, 1)            // not before the old one let go of the mic
+  await until(() => recs.length === 2)    // a fresh recognizer...
   assert.deepEqual(rec.calls, ['start', 'abort'])
   rec.emit('stale')                       // ...the old one is ignored
   const rec2 = lastRec()
@@ -625,6 +628,41 @@ test('without a tap, speech during reading is still ignored', async () => {
   await until(idle(p))
   assert.deepEqual(userLines(p), ['q'])
   assert.equal(net.calls.length, 1)
+})
+
+test('tap while reading: an old recognizer that never ends is given up after 1.5 s', async () => {
+  setTTS('synth', 4000)
+  const p = makePage()
+  net.queue.push({ body: sse('很长的回答') })
+  tap(p)
+  const rec = lastRec()
+  rec.emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  rec.abort = () => rec.calls.push('abort')   // no end event
+  tap(p)
+  tap(p)                                      // a second tap while waiting adds nothing
+  await sleep(1200)
+  assert.equal(recs.length, 1)
+  await until(() => recs.length === 2)
+  await sleep(50)
+  assert.equal(recs.length, 2)
+  assert.equal(p.data.status, 'listening')
+  key(p, 'Backspace')
+  await until(() => !p._busy)
+})
+
+test('Backspace while waiting for the old recognizer: no new one opens', async () => {
+  setTTS('synth', 2000)
+  const p = makePage()
+  net.queue.push({ body: sse('很长的回答') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  tap(p)
+  key(p, 'Backspace')
+  await sleep(50)
+  assert.equal(recs.length, 1)
+  assert.equal(p._rec, null)
 })
 
 test('tap while reading, then silence: reading finishes, then keeps listening', async () => {
@@ -663,12 +701,12 @@ test('debug: the hint shows the last four recognizer and voice events, numbered 
   lastRec().emit('q')
   await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
   assert.ok(p._dbg.some((d) => / voice 13$/.test(d)), p._dbg.join(' | '))
-  tap(p)
+  await tapReading(p)
   lastRec().emit('月球有多', false)
   recs[0].emit('旧的')
   const parts = p.data.hint.split(' | ')
   assert.equal(parts.length, 4)
-  assert.match(parts[0], /^0\.0 tap live reading$/)
+  assert.match(parts[0], /^0\.0 #1 end$/)
   assert.match(parts[1], /^0\.0 #2 start$/)
   assert.match(parts[2], /^0\.0 #2 interim 月球有多$/)
   assert.match(parts[3], /^0\.0 #1 old final 旧的$/)
@@ -684,7 +722,7 @@ test('tap while reading, then an exit word ends the conversation', async () => {
   tap(p)
   lastRec().emit('q')
   await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  tap(p)
+  await tapReading(p)
   lastRec().emit('停止')
   await until(() => p.data.status === 'ready')
   assert.ok(tts.log.includes('player.stop'))
@@ -699,7 +737,7 @@ test('tap while reading with speak() (no stop API) listens, the question still w
   tap(p)
   lastRec().emit('q')
   await until(() => p.data.status === 'speaking')
-  tap(p)
+  await tapReading(p)
   assert.equal(p.data.status, 'listening')
   assert.ok(p._tts)
   net.queue.push({ body: sse('第二个') })

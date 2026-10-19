@@ -13,7 +13,8 @@ main (bd72f17)
              └─ asr-during-reading
                  ├─ fresh-mic-on-tap
                  │   └─ asr-diagnostics   (debug log for item 8, debug on)
-                 │       └─ mic-handover  ← deploy this one
+                 │       └─ mic-handover
+                 │           └─ pause-to-listen  ← deploy this one (debug on)
                  └─ echo-probe         (test agent only, tools/echo-probe)
 ```
 
@@ -103,6 +104,19 @@ main (bd72f17)
    `mic-handover`:** the new recognizer starts when the old one has ended (at most 1.5 s).
    To check: does `#n start` still work 0.4 s after the tap (`start failed` would mean the
    glasses want it inside the tap itself)? Then `#n audiostart` / `interim …` when you speak.
+
+   **Second photo (2026-10-20, `mic-handover`):** `0.4 #15 start | 16.0 #15 error network |
+   16.0 #15 audioend | 16.0 #15 end`. The handover worked, but `#15` heard nothing and
+   timed out after ~16 s without speech. In the echo probe (test D) the mic was opened
+   *before* the voice and heard the user 100%; here it is opened *while* the voice plays.
+   Taps that worked probably fell between two segments. **Fix on `pause-to-listen`:**
+   - a tap pauses the voice, opens the new mic, and ~0.3 s later the voice goes on from
+     the start of the sentence it was in (debug: `voice pause`, `#n start`, `voice 120`);
+   - an `end` more than 5 s after the start is a timeout: the screen leaves 聆听中
+     (ready, or speaking while reading), so it no longer claims to listen;
+   - after a reading, if the recognizer timed out, a new one is opened without a tap; if
+     the glasses refuse (`start failed`), the screen shows ready and a tap is needed.
+   To check: tap during several long answers in a row; each time it should hear you.
 9. **ASR session lifecycle** — after a tap, stay silent 20–30 s, then speak: still heard?
 10. **Card ↔ full screen** — ask in the card, switch to full screen, ask again: right layout,
     and does `synthesize()` (and sentence-by-sentence reading) take over?

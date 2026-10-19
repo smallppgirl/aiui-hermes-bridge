@@ -339,12 +339,18 @@ export default {
       // a fresh recognizer: the one from the question may have stopped hearing during
       // a long answer without reporting it. The old one releases the mic only when it
       // ends (~0.4 s on the glasses); one started before that hears nothing.
+      // A recognizer opened while the voice plays hears nothing (seen on the glasses;
+      // one opened before the voice hears the user fine), so the voice pauses until
+      // the mic is open and then goes on from the start of its sentence.
       const old = this._rec
+      const tts = this._tts
       this._dropRec('abort')
+      const paused = tts.pause()
       this._afterEnd(old, () => {
         if (this._stopped) return
         this._startListening()
         if (!this._rec) this._setStatus(this._tts ? 'speaking' : 'ready')
+        if (paused) setTimeout(() => { if (this._tts === tts) tts.resume() }, 300)
       })
       return this._setStatus('listening')
     }
@@ -407,10 +413,18 @@ export default {
       if (interim) this._onInterim(interim)
     }
     rec.onerror = (e) => log('error ' + (e && (e.error || e.message)))
-    rec.onend = () => { rec._ended = true; log('end'); if (rec._onEnded) rec._onEnded() }
+    rec.onend = () => {
+      rec._ended = true
+      log('end')
+      if (rec._onEnded) rec._onEnded()
+      // an end soon after the start is the glasses' early report (results still come);
+      // a later one is the session timing out after ~15 s without speech: it no longer hears
+      if (this._rec === rec && Date.now() - rec._startAt > 5000) this._recTimedOut()
+    }
     // the rest only for the debug log: when the mic and the speech detector work
     for (const ev of ['audiostart', 'speechstart', 'speechend', 'audioend', 'nomatch']) rec['on' + ev] = () => log(ev)
     try {
+      rec._startAt = Date.now()
       rec.start()
       log('start')
     } catch (e) {
@@ -443,9 +457,18 @@ export default {
     if (BRIDGE_CONFIG.debug) this.setData({ hint: m.list.slice(1).join(' · ') })
   },
 
-  // after an answer: keep listening on the recognizer we own (a tap renews it; its
-  // end event is no sign it stopped: the glasses report end early and keep going)
+  // the recognizer stopped hearing: say so (a tap opens a new one)
+  _recTimedOut() {
+    this._rec = null
+    this._barge = false
+    if (!this._busy) this._setStatus('ready')
+    else if (this.data.status === 'listening') this._setStatus(this._tts ? 'speaking' : 'working')
+  },
+
+  // after an answer: keep listening on the recognizer we own; if it timed out during a
+  // long answer, open a new one (outside a tap: if the glasses refuse, back to ready)
   _resumeListening() {
+    if (!this._rec && !this._stopped) this._startListening()
     this._setStatus(this._rec ? 'listening' : 'ready')
   },
 
@@ -507,6 +530,8 @@ export default {
       let pos = 0   // read up to here in this._full
       const tts = {
         more: null,                         // set while waiting for more streamed text
+        pause: () => false,                 // stop the voice for now (see below)
+        resume: () => {},
         finish: (interrupted) => {
           if (this._tts !== tts) return
           this._tts = this._ttsProgress = null
@@ -557,13 +582,14 @@ export default {
         arm(this._estimateSpeechMs(text, zh) * 1.5 + 8000)   // safety net only; onEnded normally ends it
         this._mark('synth')
         this._debug('voice ' + text.length)
+        const seg = (tts.seg = { start, at: start })
         speechSynthesis.synthesize(utterance(text), { subtitles: 'sentence' }).then((task) => {
-          if (this._tts !== tts) { try { task.abort() } catch (_) {} return }
+          if (this._tts !== tts || tts.seg !== seg) { try { task.abort() } catch (_) {} return }
           const player = (tts.player = new SpeechAudioPlayer(task, { trackMode: 'hidden' }))
           tts.task = task
           const done = () => {
             try { player.destroy() } catch (_) {}
-            if (tts.player === player) tts.player = tts.task = null
+            if (tts.player === player) tts.player = tts.task = tts.seg = null
           }
           // AudioPlayer.play() is unavailable in the card (_current) target: fall back to speak()
           const fallback = () => {
@@ -588,11 +614,28 @@ export default {
           player.textTrack.addEventListener('cuechange', () => {
             const cue = player.textTrack.activeCues.item(0)
             if (tts.player === player && cue && Number.isInteger(cue.charIndex)) {
+              seg.at = start + cue.charIndex
               this._ttsProgress = (start + cue.charIndex + (cue.charLength || 0) / 2) / Math.max(1, this._full.length)
             }
           })
-        }).catch(() => { pos = start; speakSimple() })
+        }).catch(() => { if (tts.seg === seg) { tts.seg = null; pos = start; speakSimple() } })
       }
+      // pause: stop the segment being read (or about to be) and go back to the start
+      // of the sentence it was in; resume reads on from there
+      tts.pause = () => {
+        const seg = tts.seg
+        if (!seg) return false   // nothing playing (between segments or waiting for text)
+        tts.seg = tts.more = null
+        if (timer) clearTimeout(timer)
+        try { if (tts.player) tts.player.stop() } catch (_) {}
+        try { if (tts.task && tts.task.state === 'running') tts.task.abort() } catch (_) {}
+        try { if (tts.player) tts.player.destroy() } catch (_) {}
+        tts.player = tts.task = null
+        pos = this._sentenceEnd(this._full.slice(0, seg.at), seg.start)
+        this._debug('voice pause')
+        return true
+      }
+      tts.resume = () => { if (this._tts === tts && !tts.seg) next() }
       if (!this._canPlay()) return speakSimple()
       next()
     })

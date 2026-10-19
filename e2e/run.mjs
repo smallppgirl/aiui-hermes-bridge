@@ -138,14 +138,16 @@ for (const c of CASES) {
   if (LIVE) check(needsScroll, `answer 1 is long enough to need scrolling (${ans1.length} chars)`)
   if (needsScroll) check(!reading0.equals(reading1), 'text scrolls while the answer is read')
 
-  // ---- tap while reading: the voice goes on, the mic listens; question 2 (other language) ----
+  // ---- tap while reading: the voice pauses while the mic opens, then goes on; question 2 (other language) ----
   const stops = () => trace.filter((l) => l.includes('[tts] stop')).length
   const stops0 = stops()
+  const ttsTap = await ttsCount()
   await key('GlobalHook')
-  await wait(800)
+  await wait(1500)
   await shot('tap-listening')
   check(stops() === stops0, 'temple tap keeps the voice reading')
-  const tts1 = await ttsCount()   // speech requests of answer 1 (one per segment)
+  const tts1 = await ttsCount()   // speech requests of answer 1 (one per segment, plus the one after the pause)
+  if (method === 'tts.synth') check(tts1 > ttsTap, `the voice reads on after the mic opened (${tts1 - ttsTap} request(s) after the tap)`)
   answers.push({ text: a2, delay: 500 })
   await say(q2.slice(0, 5), false)
   await wait(300)
@@ -168,10 +170,10 @@ for (const c of CASES) {
   // read = the answer without its leading blank lines/spaces, in segments while it streams;
   // answer 1 up to where question 2 stopped it, answer 2 in full
   const spoken = await pg.evaluate(() => window.__tts.map((r) => r.text))
-  const [s1, s2] = [spoken.slice(0, tts1).join(''), spoken.slice(tts1).join('')]
+  const [s1, s2] = [spoken.slice(0, tts1), spoken.slice(tts1).join('')]
   const [t1, t2] = answered.slice(0, 2).map((x) => x.a.replace(/^\s+/, ''))
   const lead = answered.slice(0, 2).map((x) => (x.a.match(/^\s*/)[0].length))
-  check(s1.length > 0 && t1.startsWith(s1) && s2 === t2,
+  check(s1.length > 0 && t1.startsWith(s1[0]) && s1.every((x) => x && t1.includes(x)) && s2 === t2,
     `answers read from the start, leading whitespace trimmed (raw answers started with ${lead.join(' / ')} whitespace chars)`)
   if (c.tts === 'synth' && c.target === '_blank') {
     const first = spoken[0] || ''

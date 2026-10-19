@@ -101,7 +101,9 @@ for (const c of CASES) {
   }
 
   const zh = c.lang.startsWith('zh')
-  const [q1, a1, q2, a2] = LIVE ? [REAL[zh ? 'zh' : 'en'][0], '', REAL[zh ? 'zh' : 'en'][1], ''] : FAKE[zh ? 'zh' : 'en']
+  // E2E_Q1 / E2E_Q2 replace the live questions, e.g. E2E_Q1='美股今天股票如何？'
+  const real = REAL[zh ? 'zh' : 'en']
+  const [q1, a1, q2, a2] = LIVE ? [process.env.E2E_Q1 || real[0], '', process.env.E2E_Q2 || real[1], ''] : FAKE[zh ? 'zh' : 'en']
   const checks = []
   let caseFailed = false
   const check = (ok, what) => { checks.push((ok ? '  ✔ ' : '  ✖ ') + what); if (!ok) { failures++; caseFailed = true } }
@@ -162,6 +164,11 @@ for (const c of CASES) {
   const read2 = await untilReading(tts1, 'answer-2-streaming')
   await wait(1200)
   await shot('answer-2')
+  // a long answer 2 is read in several segments: wait until all of it was sent to the voice
+  for (const t0 = Date.now(); Date.now() - t0 < (LIVE ? 120000 : 10000); await wait(500)) {
+    const said = (await pg.evaluate(() => window.__tts.map((r) => r.text))).slice(tts1).join('')
+    if (answered[1] && said === answered[1].a.replace(/^\s+/, '')) break
+  }
   const ans2 = (answered[1] && answered[1].a) || ''
   check(read2 && ans2.length > 0, `answer 2 received (${ans2.length} chars)` + (LIVE ? ': ' + JSON.stringify(ans2.slice(0, 60)) : ''))
   const voices = (await hostLog()).filter((l) => / voice=/.test(l))

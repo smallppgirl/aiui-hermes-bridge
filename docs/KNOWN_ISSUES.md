@@ -120,6 +120,14 @@ event log on the glasses.
    - after a reading, if the recognizer timed out, a new one is opened without a tap; if
      the glasses refuse (`start failed`), the screen shows ready and a tap is needed.
    To check: tap during several long answers in a row; each time it should hear you.
+
+   **Third test (2026-10-25, `main`):** after a tap the new mic sometimes still did not take
+   the question, and while the voice read on, a question was taken late. The voice resumed
+   a fixed 0.3 s after the new mic was started, maybe before it captured; and with the voice
+   on, the recognizer finds the end of a question late. **Fix on `voice-gives-way`:** the
+   voice resumes 0.3 s after the new mic's `audiostart` (fallback 1.5 s), and pauses while
+   the wearer speaks; it reads on after 3 s without a complete question. Debug events:
+   `voice pause`, `#n audiostart`, `voice resume`.
 9. **ASR session lifecycle** — after a tap, stay silent 20–30 s, then speak: still heard?
 10. **Card ↔ full screen** — ask in the card, switch to full screen, ask again: right layout,
     and does `synthesize()` (and sentence-by-sentence reading) take over?

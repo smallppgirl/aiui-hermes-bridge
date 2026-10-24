@@ -147,7 +147,7 @@ for (const c of CASES) {
   const stops0 = stops()
   const ttsTap = await ttsCount()
   await key('GlobalHook')
-  await wait(1500)
+  await wait(2500)   // the fake host sends no audiostart: the voice resumes after the 1.5 s fallback
   await shot('tap-listening')
   check(stops() === stops0, 'temple tap keeps the voice reading')
   const tts1 = await ttsCount()   // speech requests of answer 1 (one per segment, plus the one after the pause)

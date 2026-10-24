@@ -715,16 +715,67 @@ test('tap while reading pauses the voice until the new mic is open, then reads o
   const rec2 = lastRec()
   net.queue.push({ body: sse('第二个回答') })
   const stops = tts.log.filter((l) => l === 'player.stop').length
-  rec2.emit('nex', false)                 // the question streams in while the voice goes on
+  rec2.emit('nex', false)                 // the wearer speaks: the voice gives way
   await sleep(10)
-  assert.ok(p._tts)
-  assert.equal(tts.log.filter((l) => l === 'player.stop').length, stops)
-  assert.deepEqual(userLines(p), ['q', 'nex'])
-  rec2.emit('next')                       // final: stops the reading, asks
+  assert.ok(p._tts && p._tts.held, 'voice held while the question is spoken')
   assert.equal(tts.log.filter((l) => l === 'player.stop').length, stops + 1)
+  assert.deepEqual(userLines(p), ['q', 'nex'])
+  rec2.emit('next')                       // final: ends the reading, asks
   await until(() => botLines(p).length === 2 && !p._busy)
   assert.deepEqual(userLines(p), ['q', 'next'])
   assert.deepEqual(botLines(p), ['很长的回答', '第二个回答'])
+})
+
+test('after a tap the voice goes on as soon as the new mic captures (audiostart)', async () => {
+  setTTS('synth', 3000)
+  const p = makePage()
+  net.queue.push({ body: sse('很长的回答') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => tts.log.includes('play'))
+  await tapReading(p)
+  const t0 = Date.now()
+  lastRec().onaudiostart()
+  await until(() => plays() === 2)
+  assert.ok(Date.now() - t0 < 800, 'resumed ' + (Date.now() - t0) + ' ms after audiostart, not after the 1.5 s fallback')
+  key(p, 'Backspace')
+  await until(() => !p._busy)
+})
+
+test('the wearer speaks over the voice but says nothing complete: the voice goes on after 3 s quiet', async () => {
+  setTTS('synth', 8000)
+  const p = makePage()
+  net.queue.push({ body: sse('很长的回答') })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => tts.log.includes('play'))
+  await tapReading(p)
+  lastRec().onaudiostart()
+  await until(() => plays() === 2)
+  lastRec().emit('嗯', false)               // a sound, never final
+  assert.ok(p._tts.held)
+  await sleep(2500)
+  assert.equal(plays(), 2, 'still waiting while it may go on')
+  await until(() => plays() === 3, 2000)
+  assert.equal(net.calls.length, 1)
+  key(p, 'Backspace')
+  await until(() => !p._busy)
+})
+
+test('a tap between segments holds the next one until the mic is open', async () => {
+  setTTS('synth', 100)
+  const p = makePage()
+  net.queue.push({ chunks: [sse('第一句。').trim() + '\n\n', sse('第二句。').trim() + '\n\n'], chunkDelay: 400 })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => tts.log.includes('play'))
+  await sleep(200)                          // first sentence read, waiting for more text
+  assert.ok(p._tts && !p._tts.seg)
+  tap(p)
+  await sleep(400)                          // the second sentence arrives meanwhile
+  assert.equal(plays(), 1, 'no new segment while held')
+  await until(() => plays() === 2, 3000)    // once the mic is open
+  await until(() => !p._busy)
 })
 
 test('without a tap, speech during reading is still ignored', async () => {

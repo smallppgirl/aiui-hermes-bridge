@@ -212,6 +212,13 @@ export default {
   _onInterim(text) {
     const t = (text || '').trim()
     if ((this._busy && !this._barge) || !t) return
+    // the wearer speaks over the voice (after a tap): the voice gives way, so the question
+    // ends as soon as they stop (with the voice on, the end of speech is found late)
+    if (this._barge && this._tts) {
+      this._heardAt = Date.now()
+      const tts = this._tts
+      if (!tts.held && tts.pause()) this._resumeVoice(tts, null)
+    }
     if (this._draftId) this._patchTurn(this._draftId, { text: t }).then(() => this._follow())
     else this._openUserTurn(t, true)
   },
@@ -352,7 +359,7 @@ export default {
       // ends (~0.4 s on the glasses); one started before that hears nothing.
       // A recognizer opened while the voice plays hears nothing (seen on the glasses;
       // one opened before the voice hears the user fine), so the voice pauses until
-      // the mic is open and then goes on from the start of its sentence.
+      // the new mic captures and then goes on from the start of its sentence.
       const old = this._rec
       const tts = this._tts
       this._dropRec('abort')
@@ -361,11 +368,31 @@ export default {
         if (this._stopped) return
         this._startListening()
         if (!this._rec) this._setStatus(this._tts ? 'speaking' : 'ready')
-        if (paused) setTimeout(() => { if (this._tts === tts) tts.resume() }, 300)
+        if (paused) this._resumeVoice(tts, this._rec)
       })
       return this._setStatus('listening')
     }
     if (!this._busy) this._startListening()   // still thinking: ignore
+  },
+
+  // the paused voice goes on 0.3 s after rec captures (audiostart; at most 1.5 s without
+  // that event), but not while the wearer speaks: it waits for 3 s without new words
+  _resumeVoice(tts, rec) {
+    let timer = null
+    const check = () => {
+      if (this._tts !== tts || !tts.held) return
+      const quiet = Date.now() - (this._heardAt || 0)
+      if (quiet < 3000) { timer = setTimeout(check, 3000 - quiet); return }
+      tts.resume()
+    }
+    const go = () => {
+      if (rec) rec._onAudio = null
+      if (timer) clearTimeout(timer)   // clearTimeout(null) throws in this runtime
+      timer = setTimeout(check, 300)
+    }
+    if (!rec) return go()
+    rec._onAudio = go
+    timer = setTimeout(go, 1500)
   },
 
   // run fn once rec has ended (or after 1.5 s if it never reports it)
@@ -434,6 +461,7 @@ export default {
     }
     // the rest only for the debug log: when the mic and the speech detector work
     for (const ev of ['audiostart', 'speechstart', 'speechend', 'audioend', 'nomatch']) rec['on' + ev] = () => log(ev)
+    rec.onaudiostart = () => { log('audiostart'); if (rec._onAudio) rec._onAudio() }
     try {
       rec._startAt = Date.now()
       rec.start()
@@ -563,6 +591,7 @@ export default {
       const readScroll = () => { if (!this._reading) this._startReadScroll(this._estimateSpeechMs(this._full.slice(pos), zh)) }
       const speakSimple = () => {
         if (this._tts !== tts) return
+        tts.simple = true
         if (!this._answerDone) { tts.more = speakSimple; return }
         tts.more = null
         const text = this._full.slice(pos)
@@ -578,7 +607,7 @@ export default {
       }
       // the next segment, or wait for more text, or done
       const next = () => {
-        if (this._tts !== tts) return
+        if (this._tts !== tts || tts.held) return
         tts.more = null
         const end = this._answerDone ? this._full.length : this._sentenceEnd(this._full, pos)
         if (end <= pos) {
@@ -633,20 +662,32 @@ export default {
       }
       // pause: stop the segment being read (or about to be) and go back to the start
       // of the sentence it was in; resume reads on from there
+      // (also between segments: no new one starts while held). Not for speak(), which
+      // cannot be stopped.
       tts.pause = () => {
-        const seg = tts.seg
-        if (!seg) return false   // nothing playing (between segments or waiting for text)
-        tts.seg = tts.more = null
+        if (tts.simple) return false
+        if (tts.held) return true
+        tts.held = true
+        tts.more = null
         if (timer) clearTimeout(timer)
-        try { if (tts.player) tts.player.stop() } catch (_) {}
-        try { if (tts.task && tts.task.state === 'running') tts.task.abort() } catch (_) {}
-        try { if (tts.player) tts.player.destroy() } catch (_) {}
-        tts.player = tts.task = null
-        pos = this._sentenceEnd(this._full.slice(0, seg.at), seg.start)
+        const seg = tts.seg
+        if (seg) {
+          tts.seg = null
+          try { if (tts.player) tts.player.stop() } catch (_) {}
+          try { if (tts.task && tts.task.state === 'running') tts.task.abort() } catch (_) {}
+          try { if (tts.player) tts.player.destroy() } catch (_) {}
+          tts.player = tts.task = null
+          pos = this._sentenceEnd(this._full.slice(0, seg.at), seg.start)
+        }
         this._debug('voice pause')
         return true
       }
-      tts.resume = () => { if (this._tts === tts && !tts.seg) next() }
+      tts.resume = () => {
+        if (this._tts !== tts || !tts.held) return
+        tts.held = false
+        this._debug('voice resume')
+        next()
+      }
       if (!this._canPlay()) return speakSimple()
       next()
     })

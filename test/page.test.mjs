@@ -369,10 +369,12 @@ function fakeCamera({ fail } = {}) {
   Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN', mediaDevices: {
     getUserMedia: async () => {
       if (fail) throw new Error(fail)
+      cam.openedAt = Date.now()
       return { getVideoTracks: () => [{}], getTracks: () => [{ stop: () => cam.stopped++ }] }
     } } }, configurable: true, writable: true })
   globalThis.ImageCapture = class { async takePhoto(s) {
     cam.settings.push(s)
+    cam.shotAt = Date.now()
     return { type: 'image/jpeg', arrayBuffer: async () => new Uint8Array([104, 105]).buffer }
   } }
   return cam
@@ -414,10 +416,21 @@ test('the bridge asks for a photo: it is taken and the question asked again with
   assert.equal(net.calls[1].body.message[0].text, '这是什么')
   assert.deepEqual(net.calls[1].body.message[1], { role: 'user', type: 'image', image_url: 'data:image/jpeg;base64,aGk=' })
   assert.deepEqual(cam.settings, [{ quality: 'normal', mode: 'telephoto', enableSystemPreview: false }])
+  assert.ok(cam.shotAt - cam.openedAt >= 950, 'waits ~1 s for the exposure: ' + (cam.shotAt - cam.openedAt) + ' ms')
   assert.equal(cam.stopped, 1)
   assert.ok(shown.includes('正在拍照…'))
   assert.ok(tts.utterances.some((u) => u.text === '这是一只猫。'))
   assert.equal(p.data.status, 'listening')
+  delete globalThis.ImageCapture
+})
+
+test('photoSettleMs: 0 takes the photo at once; debug shows its size', async () => {
+  setTTS('synth')
+  const p = makePage({ config: { photoSettleMs: 0, debug: true } })
+  const cam = fakeCamera()
+  await p._takePhoto()
+  assert.ok(cam.shotAt - cam.openedAt < 50)
+  assert.match(p.data.hint, /photo 0 KB$/)
   delete globalThis.ImageCapture
 })
 

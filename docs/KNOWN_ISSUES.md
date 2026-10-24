@@ -127,7 +127,12 @@ event log on the glasses.
     answer the old recognizer may have stopped; a new one can only open on a tap.
 12. **Long answer** — ask for a very long answer: does it stream and scroll smoothly?
 13. **Photo** — in full screen ask 这是什么 while looking at something: 正在拍照…, then an
-    answer about it? Note the time, and the `[photo]` size in the console if you can see it.
+    answer about it? Note the time. On 2026-10-25 the photo reached Hermes but Hermes said
+    画面全黑 (all black): the photo was taken the moment the camera opened. Branch
+    `photo-exposure` waits `photoSettleMs` (1000) first; with `debug: true` the hint shows
+    `photo N KB` (black ≈ a few dozen KB, a real photo hundreds). The bridge logs the size
+    too and keeps the latest photo in `~/rokid-hermes-xdc/logs/last_photo.jpg` on macvm
+    (bridge PR #5). If 1 s is not enough, raise `photoSettleMs`.
 
 ## Ideas
 

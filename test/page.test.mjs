@@ -50,7 +50,7 @@ test('buildPayload: text only and with a photo', () => {
   assert.match(a.message_id, /^aiui-\d+$/)
   const b = buildPayload('look', 'data:image/jpeg;base64,xx')
   assert.equal(b.message.length, 2)
-  assert.deepEqual(b.message[1], { role: 'user', type: 'image_url', image_url: { url: 'data:image/jpeg;base64,xx' } })
+  assert.deepEqual(b.message[1], { role: 'user', type: 'image', image_url: 'data:image/jpeg;base64,xx' })
 })
 
 test('UI strings and status chip follow the system language', () => {
@@ -363,28 +363,104 @@ test('semantic wake-up: if the mic may not open without a tap, ready for a tap',
   } finally { FakeRec.failStart = false }
 })
 
+// a fake camera: takePhoto() gives the bytes "hi" (base64 aGk=); fail = getUserMedia rejects
+function fakeCamera({ fail } = {}) {
+  const cam = { stopped: 0, settings: [] }
+  Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN', mediaDevices: {
+    getUserMedia: async () => {
+      if (fail) throw new Error(fail)
+      return { getVideoTracks: () => [{}], getTracks: () => [{ stop: () => cam.stopped++ }] }
+    } } }, configurable: true, writable: true })
+  globalThis.ImageCapture = class { async takePhoto(s) {
+    cam.settings.push(s)
+    return { type: 'image/jpeg', arrayBuffer: async () => new Uint8Array([104, 105]).buffer }
+  } }
+  return cam
+}
+const takePhotoSse = 'data: {"type": "tool_call", "tool_call": {"command": "take_photo"}, "is_finish": false}\n\n' +
+  'data: {"type": "tool_call", "is_finish": true}\n\n'
+
 test('askWithPhoto: no camera falls back to text, camera adds the image', async () => {
   setTTS('none')
   const p = makePage({ config: { readAloud: false } })
-  Object.defineProperty(globalThis, 'navigator', { value: { language: 'zh-CN' }, configurable: true, writable: true })
+  fakeCamera({ fail: 'no camera' })
   net.queue.push({ body: sse('看到了') })
   await p.askWithPhoto()
   assert.equal(net.calls[0].body.message.length, 1)
   assert.equal(net.calls[0].body.message[0].text, '看看这个')
-  // with a fake camera
-  const stopped = []
-  globalThis.navigator.mediaDevices = { getUserMedia: async () => ({
-    getVideoTracks: () => [{}], getTracks: () => [{ stop: () => stopped.push(1) }] }) }
-  globalThis.ImageCapture = class { async takePhoto() { return 'blob' } }
-  globalThis.FileReader = class { readAsDataURL() { this.result = 'data:image/jpeg;base64,AA'; this.onload() } }
+  const cam = fakeCamera()
   net.queue.push({ body: sse('一只猫') })
   await p.askWithPhoto('这是什么')
   const msg = net.calls[1].body.message
   assert.equal(msg[0].text, '这是什么')
-  assert.equal(msg[1].image_url.url, 'data:image/jpeg;base64,AA')
-  assert.equal(stopped.length, 1)
+  assert.deepEqual(msg[1], { role: 'user', type: 'image', image_url: 'data:image/jpeg;base64,aGk=' })
+  assert.equal(cam.stopped, 1)
   delete globalThis.ImageCapture
-  delete globalThis.FileReader
+})
+
+test('the bridge asks for a photo: it is taken and the question asked again with it', async () => {
+  setTTS('synth')
+  const p = makePage()
+  const cam = fakeCamera()
+  net.queue.push({ body: takePhotoSse }, { body: sse('这是一只猫。') })
+  const shown = []
+  const patch = p._patchTurn.bind(p)
+  p._patchTurn = (id, d) => { shown.push(d.text); return patch(id, d) }
+  tap(p)
+  lastRec().emit('这是什么')
+  await until(() => botLines(p)[0] === '这是一只猫。' && !p._busy)
+  assert.equal(net.calls.length, 2)
+  assert.equal(net.calls[0].body.message.length, 1)
+  assert.equal(net.calls[1].body.message[0].text, '这是什么')
+  assert.deepEqual(net.calls[1].body.message[1], { role: 'user', type: 'image', image_url: 'data:image/jpeg;base64,aGk=' })
+  assert.deepEqual(cam.settings, [{ quality: 'normal', mode: 'telephoto', enableSystemPreview: false }])
+  assert.equal(cam.stopped, 1)
+  assert.ok(shown.includes('正在拍照…'))
+  assert.ok(tts.utterances.some((u) => u.text === '这是一只猫。'))
+  assert.equal(p.data.status, 'listening')
+  delete globalThis.ImageCapture
+})
+
+test('the bridge asks for a photo in the card: no camera, a hint to go full screen, no retry', async () => {
+  setTTS('synth')
+  const p = makePage()
+  p.onTargetChanged('_current')
+  const cam = fakeCamera()
+  net.queue.push({ body: takePhotoSse })
+  tap(p)
+  lastRec().emit('这是什么')
+  await until(() => !p._busy && p.data.status === 'ready')
+  assert.equal(net.calls.length, 1)
+  assert.equal(cam.settings.length, 0)
+  assert.equal(botLines(p)[0], '（拍照需要全屏：双击卡片进入全屏后再问）')
+  delete globalThis.ImageCapture
+})
+
+test('the bridge asks for a photo and the camera fails: the error is shown, no retry', async () => {
+  setTTS('synth')
+  const p = makePage()
+  fakeCamera({ fail: 'NotAllowedError' })
+  net.queue.push({ body: takePhotoSse })
+  tap(p)
+  lastRec().emit('这是什么')
+  await until(() => !p._busy && p.data.status === 'ready')
+  assert.equal(net.calls.length, 1)
+  assert.equal(botLines(p)[0], '（拍照失败：NotAllowedError）')
+  delete globalThis.ImageCapture
+})
+
+test('the bridge asks for a photo again although one was sent: no loop, empty answer shown', async () => {
+  setTTS('synth')
+  const p = makePage()
+  const cam = fakeCamera()
+  net.queue.push({ body: takePhotoSse }, { body: takePhotoSse }, { body: takePhotoSse })
+  tap(p)
+  lastRec().emit('这是什么')
+  await until(() => !p._busy && p.data.status === 'ready')
+  assert.equal(cam.settings.length, 1)
+  assert.equal(net.calls.length, 3)   // the photo request, then once more on the "empty" retry
+  assert.equal(botLines(p)[0], '（未收到回复（桥返回空））')
+  delete globalThis.ImageCapture
 })
 
 // ---------------- TTS voice + reading ----------------

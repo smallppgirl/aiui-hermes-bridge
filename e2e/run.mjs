@@ -41,7 +41,9 @@ const asked = []
 const answered = []
 const server = await serve({ live: LIVE, onBridgeRequest: (b) => asked.push(b.message?.[0]?.text), onBridgeAnswer: (a, status) => answered.push({ a, status }) })
 const base = `http://127.0.0.1:${server.address().port}/`
-const browser = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] })
+// fake mic, and a fake audio output: with the Mac's real output Web Audio stalls when that
+// device is busy or stuck, and the runtime then never gets mic audio
+const browser = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', '--disable-audio-output'] })
 rmSync(outRoot, { recursive: true, force: true })
 if (LIVE) console.log('LIVE bridge:', bridgeUrl(), '\n')
 let failures = 0

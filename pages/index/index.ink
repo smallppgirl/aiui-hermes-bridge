@@ -41,6 +41,8 @@ export default {
       if (this._abort) this._abort.abort()
       const ctrl = (this._abort = new AbortController())
       const timer = setTimeout(() => ctrl.abort(), 120000)   // 2-minute cap
+      this._photoAsked = false
+      this._answerDone = false
       try {
         const payload = buildPayload(text || '', imageDataUrl)
         if (this._asrLang) payload.metadata.language = this._asrLang
@@ -67,12 +69,20 @@ export default {
         } else {
           feed(await resp.text())   // some mini-app runtimes buffer the whole body instead of streaming
         }
+        // the bridge took it as a question about the scene: take the photo and ask again with it
+        if (!this._answer && this._photoAsked && !imageDataUrl) {
+          await this._patchTurn(botId, { text: this.data.strings.photo, pending: true })
+          imageDataUrl = await this._takePhoto()
+          await this._patchTurn(botId, { text: '', pending: true })
+          attempt--   // not a retry
+          continue
+        }
         if (!this._answer) throw new Error('未收到回复（桥返回空）')
         await this._flushAnswer()
         if (this._botId === botId) this._botId = null
         return true
       } catch (e) {
-        if (attempt < 2 && e && e.name !== 'AbortError' && !this._stopped) {
+        if (attempt < 2 && e && e.name !== 'AbortError' && !e.photo && !this._stopped) {
           // transient network timeout — retry once, from a clean answer line
           this._answer = this._full = ''
           if (this._readP) { this._stopSpeaking(false); this._readP = null }
@@ -123,6 +133,7 @@ export default {
     if (!m) return
     try {
       const obj = JSON.parse(m[1])
+      if (obj && obj.type === 'tool_call' && obj.tool_call && obj.tool_call.command === 'take_photo') this._photoAsked = true
       if (obj && obj.type === 'answer' && obj.answer_stream) {
         if (!this._answer) this._mark('text')
         // Hermes answers often start with blank lines or a space: drop them (no indent, not read aloud)
@@ -711,25 +722,37 @@ export default {
     this.setData(Object.assign({ status, chip, hint }, extra))
   },
 
-  // capture a photo with the AIUI camera API and send it with the query (vision)
-  async askWithPhoto(text) {
-    let imageDataUrl = ''
+  // take a photo with the AIUI camera API and return it as a data URL; throws (e.photo)
+  // with a message for the dialog when it can't. The camera works only in full screen.
+  async _takePhoto() {
+    const s = this.data.strings
+    const fail = (msg) => Object.assign(new Error(msg), { photo: true })
+    if (this._target === '_current') throw fail(s.photoFullScreen)
+    let stream = null
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      const blob = await new ImageCapture(stream.getVideoTracks()[0]).takePhoto({ mode: 'default' })
-      imageDataUrl = await new Promise((resolve) => {
-        const fr = new FileReader()
-        fr.onload = () => resolve(fr.result)
-        fr.onerror = () => resolve('')
-        fr.readAsDataURL(blob)
-      })
-      stream.getTracks().forEach(t => t.stop())
+      stream = await navigator.mediaDevices.getUserMedia({ video: true })
+      // telephoto (2016x1512) is the mode meant for AI image recognition; no system preview
+      const blob = await new ImageCapture(stream.getVideoTracks()[0])
+        .takePhoto({ quality: 'normal', mode: 'telephoto', enableSystemPreview: false })
+      const bytes = new Uint8Array(await blob.arrayBuffer())
+      let binary = ''
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+      console.log('[photo]', blob.type, bytes.length, 'bytes')
+      return 'data:' + (blob.type || 'image/jpeg') + ';base64,' + btoa(binary)
     } catch (e) {
-      // no camera / permission denied — fall back to text only
+      throw fail(s.photoFailed + ((e && e.message) || e))
+    } finally {
+      try { if (stream) stream.getTracks().forEach((t) => t.stop()) } catch (_) {}
     }
+  },
+
+  // ask about the scene: take the photo first and send it with the question
+  async askWithPhoto(text) {
     const q = text || '看看这个'
     await this._commitUserTurn(q)
-    await this.ask(q, imageDataUrl || undefined)
+    let imageDataUrl
+    try { imageDataUrl = await this._takePhoto() } catch (_) { /* no camera: text only */ }
+    await this.ask(q, imageDataUrl)
   },
 
   onKeyUp(event) {
@@ -795,12 +818,14 @@ export default {
       talk: '说话', hintIdle: '眼镜腿 tap = 开始 · 说「退出」结束',
       hintListening: '正在听 · 说完即可', hintWorking: '请稍候', hintSpeaking: '眼镜腿 tap = 提问',
       ended: '（会话已结束）',
+      photo: '正在拍照…', photoFailed: '拍照失败：', photoFullScreen: '拍照需要全屏：双击卡片进入全屏后再问',
     } : {
       chipReady: 'READY', chipListening: 'LISTENING', chipThinking: 'THINKING', chipSpeaking: 'SPEAKING',
       idle: 'Tap the temple to start', say: 'Your turn…', thinking: 'Thinking…',
       talk: 'Talk', hintIdle: 'temple tap = start · say "exit" to stop',
       hintListening: 'listening · just speak', hintWorking: 'one moment', hintSpeaking: 'temple tap = ask',
       ended: '(conversation ended)',
+      photo: 'Taking a photo…', photoFailed: 'photo failed: ', photoFullScreen: 'photos need full screen: double-tap the card, then ask again',
     }
   },
 }
@@ -820,7 +845,7 @@ export default {
         <view id="log" class="log">
           <text class="line idle" ink:if="{{ !turns.length }}">{{ status === 'listening' ? strings.say : strings.idle }}</text>
           <view class="turn" ink:for="{{ turns }}" ink:key="id">
-            <text class="line {{ item.role }} {{ item.pending ? 'pending' : '' }}">{{ item.pending ? strings.thinking : item.text }}</text>
+            <text class="line {{ item.role }} {{ item.pending ? 'pending' : '' }}">{{ item.pending && !item.text ? strings.thinking : item.text }}</text>
           </view>
         </view>
       </scroll-view>

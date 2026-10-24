@@ -14,7 +14,8 @@ main (bd72f17)
                  ├─ fresh-mic-on-tap
                  │   └─ asr-diagnostics   (debug log for item 8, debug on)
                  │       └─ mic-handover
-                 │           └─ pause-to-listen  ← deploy this one (debug on)
+                 │           └─ pause-to-listen
+                 │               └─ take-photo  ← deploy this one (debug on)
                  └─ echo-probe         (test agent only, tools/echo-probe)
 ```
 
@@ -56,6 +57,20 @@ main (bd72f17)
 - A tap during reading opens a fresh recognizer (the one from the question may have
   stopped hearing during a long answer without reporting it).
 - With `debug: true` the hint shows the last 3 recognizer events.
+
+**`take-photo`**
+- When the bridge answers a question with `take_photo` (a question about the scene, like
+  这是什么), the agent shows 正在拍照…, takes a photo (`telephoto`, `normal` quality, no
+  system preview) and asks again with it. Before, this showed 未收到回复（桥返回空）.
+- Photos go to the bridge as `{type: "image", image_url: "data:…"}`, the shape it reads
+  (checked on the real bridge: 这是什么 + a screenshot was described correctly in 3.6 s).
+- In the card the camera is unavailable: the answer line says to go full screen. A camera
+  error is shown as 拍照失败：…, without a retry.
+- Bridge side (`smallppgirl/rokid-hermes-bridge` PR #2, merged): questions like 看看美股 /
+  分析一下美股 no longer trigger `take_photo`. **Not live until the bridge server is
+  pulled and restarted** (2026-10-24 it still answered 美股看看美股 with `take_photo`).
+- e2e: Chromium now uses a fake audio output; with the Mac's real output stalled, Web Audio
+  stopped and the runtime never got mic audio.
 
 ## Not fixed
 
@@ -123,6 +138,8 @@ main (bd72f17)
 11. **Without a tap after reading** — speak right after an answer ends: heard? After a long
     answer the old recognizer may have stopped; a new one can only open on a tap.
 12. **Long answer** — ask for a very long answer: does it stream and scroll smoothly?
+13. **Photo** — in full screen ask 这是什么 while looking at something: 正在拍照…, then an
+    answer about it? Note the time, and the `[photo]` size in the console if you can see it.
 
 ## Ideas
 

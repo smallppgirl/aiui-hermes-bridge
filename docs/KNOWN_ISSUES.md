@@ -1,23 +1,11 @@
 # Status and known issues
 
-As of 2026-10-18. `main` and the glasses are at `bd72f17`. The work below is on stacked
-branches (each starts from the previous one); `fresh-mic-on-tap` contains all of it except
-the test agent. 74 unit tests and the fake e2e pass on it; the live e2e
-(`npm run e2e -- --live`) last passed on `tts-timing-and-sentences`.
-
-```
-main (bd72f17)
- └─ answer-trim-and-limit
-     └─ tap-keeps-reading
-         └─ tts-timing-and-sentences
-             └─ asr-during-reading
-                 ├─ fresh-mic-on-tap
-                 │   └─ asr-diagnostics   (debug log for item 8, debug on)
-                 │       └─ mic-handover
-                 │           └─ pause-to-listen
-                 │               └─ take-photo  ← deploy this one (debug on)
-                 └─ echo-probe         (test agent only, tools/echo-probe)
-```
+As of 2026-10-25. Everything below is merged into `main`; the branch names under "Done"
+say where each change was made (those branches are deleted). The only other branch is
+`echo-probe`, the test agent (`tools/echo-probe`), kept apart on purpose. 84 unit tests and
+the fake e2e pass on `main`; the live e2e (`npm run e2e -- --live`) last passed on
+`pause-to-listen`. `debug` is off on `main`: set `debug: true` in `config.js` for the
+event log on the glasses.
 
 ## Done
 

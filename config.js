@@ -30,6 +30,9 @@ export const BRIDGE_CONFIG = {
   // true = show speech-recognition events (start / interim / final / error / end)
   // in the hint line, to diagnose listening problems on the glasses.
   debug: false,
+  // ms to wait after the camera opens before taking a photo, so its exposure can settle
+  // (a photo taken at once can come out black)
+  photoSettleMs: 1000,
 };
 
 // Minimal Rokid/lingzhu-style request. The bridge accepts extra fields.

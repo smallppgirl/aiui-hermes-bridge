@@ -731,13 +731,17 @@ export default {
     let stream = null
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: true })
+      // a camera that just switched on needs a moment for its exposure, or the photo is black
+      const settle = BRIDGE_CONFIG.photoSettleMs === undefined ? 1000 : BRIDGE_CONFIG.photoSettleMs
+      if (settle > 0) await new Promise((r) => setTimeout(r, settle))
       // telephoto (2016x1512) is the mode meant for AI image recognition; no system preview
       const blob = await new ImageCapture(stream.getVideoTracks()[0])
         .takePhoto({ quality: 'normal', mode: 'telephoto', enableSystemPreview: false })
       const bytes = new Uint8Array(await blob.arrayBuffer())
       let binary = ''
       for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-      console.log('[photo]', blob.type, bytes.length, 'bytes')
+      // a black 2016x1512 JPEG is a few dozen KB, a real photo hundreds
+      this._debug('photo ' + Math.round(bytes.length / 1024) + ' KB')
       return 'data:' + (blob.type || 'image/jpeg') + ';base64,' + btoa(binary)
     } catch (e) {
       throw fail(s.photoFailed + ((e && e.message) || e))

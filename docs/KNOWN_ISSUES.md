@@ -5,7 +5,12 @@ design on `main` with the native assistant's: speaking interrupts, a tap does no
 `voice-gives-way` keeps the tap design (pause, resume, give way) so the two can be
 compared on the glasses; only one of them should be merged. The branch names under
 "Done" say where each change was made. `echo-probe`, the test agent
-(`tools/echo-probe`), is kept apart on purpose. 91 unit tests and the fake e2e pass here.
+(`tools/echo-probe`), is kept apart on purpose. 91 unit tests and the fake e2e pass here,
+and the live e2e passed on 2026-10-26. The e2e host now acts like the glasses in full
+screen: speech at about the real pace, a mic that stops after 16 s without speech, and a
+mic opened while the voice plays is deaf. Question 2 is asked 22 s into a long reading, and
+the run checks the mic was renewed, nothing was lost, and an exit word is still heard
+after the reading. `E2E_DEBUG=1` shows the debug line in the screenshots.
 `debug` is off: set `debug: true` in `config.js` for the event log on the glasses.
 
 ## Done

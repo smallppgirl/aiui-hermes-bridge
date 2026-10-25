@@ -15,7 +15,7 @@ const skip = /^(\.git|node_modules|test|e2e|docs)(\/|$)/
 const walk = (d) => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]))
 const BRIDGE_URL = /^(\s*url:\s*")([^"]+)(")/m
 
-// E2E_BRIDGE_URL overrides the target (e.g. a local slow-streaming stub)
+// E2E_BRIDGE_URL overrides the target (e.g. a local slow-streaming stub); E2E_DEBUG=1 turns on debug
 export const bridgeUrl = () => process.env.E2E_BRIDGE_URL || readFileSync(join(root, 'config.js'), 'utf8').match(BRIDGE_URL)[2]
 
 // the agent as the glasses get it
@@ -24,6 +24,8 @@ function bundle(live, origin) {
     .map((path) => {
       let data = readFileSync(join(root, path))
       if (live && path === 'config.js') data = Buffer.from(data.toString('utf8').replace(BRIDGE_URL, `$1${origin}/bridge$3`))
+      // E2E_DEBUG=1: the event log in the hint line, as with debug: true on the glasses
+      if (process.env.E2E_DEBUG && path === 'config.js') data = Buffer.from(data.toString('utf8').replace(/^(\s*debug:\s*)false/m, '$1true'))
       return { path, base64: data.toString('base64') }
     })
   if (!live) files.push({ path: 'secrets.js', base64: Buffer.from('export const SECRETS = { ak: "e2e-dummy-ak" }\n').toString('base64') })

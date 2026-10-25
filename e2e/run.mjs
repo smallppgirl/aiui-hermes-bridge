@@ -5,6 +5,9 @@
 //   npm run e2e -- --live   the REAL bridge from config.js + real AK from secrets.js:
 //                           real Hermes answers (costs tokens; ~2 questions per case)
 //   add a case filter, e.g. npm run e2e -- --live zh-CN-synth_blank
+//   E2E_DEBUG=1 npm run e2e   debug: true in the bundle (event log in the screenshots)
+// Full screen with synthesize() runs like the glasses: speech at about the real pace, and a
+// mic that stops after 16 s without speech and is deaf if opened while the voice plays.
 import { chromium } from 'playwright'
 import { mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
@@ -110,7 +113,10 @@ for (const c of CASES) {
   let caseFailed = false
   const check = (ok, what) => { checks.push((ok ? '  ✔ ' : '  ✖ ') + what); if (!ok) { failures++; caseFailed = true } }
 
-  await pg.goto(`${base}?lang=${c.lang}&tts=${c.tts}&target=${c.target}`)
+  // like the glasses: the full-screen voice can be renewed around, the card's speak() cannot
+  const glasses = c.tts === 'synth' && c.target === '_blank'
+  const pace = glasses ? (zh ? 200 : 65) : 40
+  await pg.goto(`${base}?lang=${c.lang}&tts=${c.tts}&target=${c.target}&pace=${pace}` + (glasses ? '&asrTimeout=16000' : ''))
   await pg.waitForFunction(() => window.__ready)
   await wait(1200)
   await shot('initial')
@@ -128,6 +134,7 @@ for (const c of CASES) {
   await wait(400)
   await shot('question-thinking')
   const read1 = await untilReading(0, 'answer-streaming')
+  const tRead = Date.now()
   const reading0 = await shot('answer-reading')
   // reading scroll follows the speech; speak() is paced by the estimate, so allow time
   let reading1 = reading0
@@ -142,6 +149,19 @@ for (const c of CASES) {
   if (LIVE) check(needsScroll, `answer 1 is long enough to need scrolling (${ans1.length} chars)`)
   if (needsScroll) check(!reading0.equals(reading1), 'text scrolls while the answer is read')
 
+  // like the glasses: speak late in a long reading, when the mic from the question would long
+  // have timed out (only a mic renewed between segments still hears)
+  const sessions = () => pg.evaluate(() => __asr.sessions.map((s) => ({ openedAt: s.openedAt, deaf: s.deaf })))
+  // still reading: playing, or between two segments with more of the answer to come
+  const reading = async () => (await pg.evaluate(() => window.__playing)) ||
+    !answered[0] || (await pg.evaluate(() => window.__tts.map((r) => r.text).join(''))) !== answered[0].a.replace(/^\s+/, '')
+  if (glasses) for (; Date.now() - tRead < 22000 && (await reading()); ) await wait(500)
+  const readFor = Math.round((Date.now() - tRead) / 1000)
+  if (glasses) {
+    const renewed = (await sessions()).filter((s) => s.openedAt > tRead).length
+    check(readFor < 15 || renewed > 0, `the mic is renewed during a long reading (${renewed} new session(s) in ${readFor} s of reading)`)
+  }
+
   // ---- talk over the reading (no tap needed): the first words stop it; question 2 (other language) ----
   const stops = () => trace.filter((l) => l.includes('[tts] stop')).length
   const stops0 = stops()
@@ -152,7 +172,7 @@ for (const c of CASES) {
   answers.push({ text: a2, delay: 500 })
   await say(q2.slice(0, 5), false)
   await wait(150)
-  check(stops() > stops0, 'the first words of question 2 stop the reading of answer 1')
+  check(stops() > stops0, `the first words of question 2 stop the reading of answer 1 (${readFor} s into the reading)`)
   const tts1 = await ttsCount()   // speech requests of answer 1 (one per segment)
   await shot('question-2-live')
   await say(q2)
@@ -189,6 +209,17 @@ for (const c of CASES) {
   await key('ArrowUp'); await wait(800); const up = await shot('swipe-up')
   await key('ArrowDown'); await wait(800); const down = await shot('swipe-down')
   check(!before.equals(up) && !up.equals(down), 'temple swipe scrolls the dialog up and back down')
+
+  // ---- after the readings the mic still hears: an exit word ends the conversation ----
+  await wait(3000)
+  await say(zh ? '退出' : 'exit')
+  await wait(800)
+  await shot('ended')
+  const exitWord = zh ? '退出' : 'exit'
+  check(trace.some((l) => / #\d+ final /.test(l) && l.endsWith(' final ' + exitWord)) && asked.length === 2, 'the mic still hears after the reading: the exit word ends the conversation')
+  const dropped = (await hostLog()).filter((l) => l.startsWith('asr.dropped'))
+  const deaf = (await sessions()).filter((s) => s.deaf).length
+  check(!dropped.length && !deaf, `no speech lost to a timed-out or deaf mic (${(await sessions()).length} sessions, ${deaf} deaf)` + (dropped.length ? ': ' + dropped.join(' | ') : ''))
   check(errors.length === 0, 'no runtime errors' + (errors.length ? ': ' + errors.slice(0, 3).join(' | ') : ''))
   console.log(name + '\n' + checks.join('\n'))
   if (LIVE) console.log(trace.filter((l) => l.includes('timing')).map((l) => '    ' + l.replace(/^\S+ /, '')).join('\n'))

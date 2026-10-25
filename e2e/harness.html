@@ -10,6 +10,21 @@ const ttsMode = params.get('tts') || 'synth'
 const target = params.get('target') || '_blank'
 const W = target === '_current' ? 448 : 480, H = target === '_current' ? 150 : 352
 const synth = {}
+const pace = +(params.get('pace') || 40)   // speech: ms per character
+// like the glasses (seen on the device), when asrTimeout is set: a recognizer stops ~16 s
+// after it opens or last heard speech (error network, then end), and one opened while the
+// voice plays hears nothing. Speech for such a session is dropped (host log asr.dropped).
+const asrTimeout = +(params.get('asrTimeout') || 0)
+let playing = false   // from the agent's own log: [tts] timing at each play, voice end / [tts] stop
+for (const k of ['log', 'info']) {
+  const f = console[k].bind(console)
+  console[k] = (...a) => {
+    const t = a.join(' ')
+    if (t.includes('[tts] timing')) playing = true
+    else if (t.includes('voice end') || t.includes('[tts] stop')) playing = false
+    f(...a)
+  }
+}
 configNavigatorHost(null, null, null, [lang])
 // ---- fake host: records requests, lets the test inject recognizer events ----
 const log = (window.__log = [])
@@ -21,12 +36,33 @@ const cur = () => asr.sessions[asr.sessions.length - 1]
 window.__emit = (type, extra = {}) => { const s = cur(); emit('speech.' + type, { targetId: s.targetId, sessionId: s.sessionId, ...extra }) }
 window.__say = (transcript, isFinal = true) => {
   const s = cur()
+  if (s.ended || s.deaf) { log.push('asr.dropped ' + (s.deaf ? 'deaf' : 'ended') + ' ' + transcript); return }
+  s.heardAt = Date.now()
   emit('speech.result', { targetId: s.targetId, sessionId: s.sessionId, resultIndex: s.index, isFinal, alternatives: [{ transcript, confidence: 0.9 }] })
   if (isFinal) s.index++
 }
+Object.defineProperty(window, '__playing', { get: () => playing })
 window.__key = (code) => { view.dispatchInput('keydown', code); view.dispatchInput('keyup', code) }
-const session = (req) => { asr.sessions.push({ targetId: req.targetId, sessionId: req.sessionId, index: 0, audioBytes: 0 }); setTimeout(() => emit('speech.start', { targetId: req.targetId, sessionId: req.sessionId }), 10) }
-const endOf = (req) => setTimeout(() => emit('speech.end', { targetId: req.targetId, sessionId: req.sessionId }), 10)
+const session = (req) => {
+  const ids = { targetId: req.targetId, sessionId: req.sessionId }
+  const s = { ...ids, index: 0, audioBytes: 0, openedAt: Date.now(), heardAt: Date.now(), deaf: asrTimeout > 0 && playing, ended: false }
+  asr.sessions.push(s)
+  setTimeout(() => emit('speech.start', ids), 10)
+  setTimeout(() => !s.ended && emit('speech.audiostart', ids), 40)
+  if (asrTimeout) s.timer = setInterval(() => {
+    if (s.ended || Date.now() - s.heardAt < asrTimeout) return
+    s.ended = true
+    clearInterval(s.timer)
+    log.push('asr.timeout')
+    emit('speech.error', { ...ids, error: 'network', message: 'no speech' })
+    emit('speech.end', ids)
+  }, 200)
+}
+const endOf = (req) => {
+  const s = asr.sessions.find((x) => x.sessionId === req.sessionId)
+  if (s) { if (s.ended) return; s.ended = true; clearInterval(s.timer) }
+  setTimeout(() => emit('speech.end', { targetId: req.targetId, sessionId: req.sessionId }), 10)
+}
 const host = {
   speech: {
     // SpeechRecognition (runtime 0.18): mic via MediaRecorder -> host ASR stream
@@ -45,7 +81,7 @@ const host = {
     // speak(): resolves when "done" (40 ms per character)
     speak(req) {
       log.push('tts.speak voice=' + req.voice + ' lang=' + req.lang + ' len=' + req.text.length); tts.push(req)
-      return new Promise((r) => setTimeout(() => { log.push('tts.speak.done'); r() }, req.text.length * 40))
+      return new Promise((r) => setTimeout(() => { log.push('tts.speak.done'); r() }, req.text.length * pace))
     },
     cancelSpeak() { log.push('tts.cancel') },
     // synthesize(): streams silent 16 kHz PCM paced in real time, one cue per sentence
@@ -56,7 +92,7 @@ const host = {
       let t = 0, at = 0, seq = 0
       const timers = (synth[id] = [])
       for (const sen of sentences) {
-        const ms = sen.length * 40
+        const ms = sen.length * pace
         const cue = { id: 'c' + seq, text: sen, startTimeMs: t, endTimeMs: t + ms, charIndex: at, charLength: sen.length }
         const audio = new Uint8Array(Math.round(16000 * 2 * ms / 1000))
         const n = seq++

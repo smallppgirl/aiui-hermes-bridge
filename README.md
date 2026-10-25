@@ -43,6 +43,13 @@ bridge over SSE and renders the streamed answer on the glasses HUD.
   one in the other language — 8 questions in total, so it costs tokens; never run by default).
   Run one case with e.g. `npm run e2e -- --live zh-CN-synth_blank`. Screenshots: `e2e/out-live/`.
   `E2E_BRIDGE_URL=<url>` points the live run at another bridge or a local stub.
+- `npm run e2e:rounds` (add `-- --live` for the real bridge: 5 questions) — one session of five
+  rounds in full screen on a host that acts like the glasses: a long answer interrupted
+  mid-reading, an answer read to the end, a follow-up with no tap, silence, a question
+  cancelled while thinking, an exit word. Checks the order, timing, voice and mic of each
+  round and reports how long each mic renewal is deaf. Screenshots: `e2e/out-rounds/`.
+- `E2E_DEBUG=1` before either command turns on `debug` in the test bundle only, so the
+  screenshots show the event line (`config.js` stays `debug: false`).
 - `test/` and `e2e/` are excluded from the `.aix` package via `.aixignore`.
 
 Runtime facts found this way (they differ from a browser):

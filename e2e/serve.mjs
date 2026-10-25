@@ -51,7 +51,7 @@ async function proxy(req, res, onRequest, onAnswer) {
     res.end()
     // the answer text, for the test's checks
     const answer = raw.replace(/\r/g, '').split('\n\n').map((b) => { try { return JSON.parse(b.match(/data:\s*(\{.*\})/s)[1]).answer_stream || '' } catch (_) { return '' } }).join('')
-    onAnswer && onAnswer(answer, upstream.status)
+    onAnswer && onAnswer(answer, upstream.status, JSON.parse(body.toString('utf8') || '{}'))
   } catch (e) {
     res.writeHead(502, { 'content-type': 'text/plain' })
     res.end('e2e proxy: ' + e.message)

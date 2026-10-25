@@ -85,7 +85,10 @@ export default {
         if (this._botId === botId) this._botId = null
         return true
       } catch (e) {
-        if (attempt < 2 && e && e.name !== 'AbortError' && !e.photo && !this._stopped) {
+        // stopped by us (a newer question, Backspace, the 2-minute cap): on the glasses an abort
+        // mid-stream may not reject with an AbortError, so go by the signal, and never retry it
+        const aborted = ctrl.signal.aborted || (e && e.name === 'AbortError')
+        if (attempt < 2 && e && !aborted && !e.photo && !this._stopped) {
           // transient network timeout — retry once, from a clean answer line
           this._answer = this._full = ''
           if (this._readP) { this._stopSpeaking(false); this._readP = null }
@@ -93,7 +96,7 @@ export default {
           await new Promise((r) => setTimeout(r, 500))
           continue
         }
-        const msg = (e && e.name === 'AbortError') ? '（已停止）' : ('（' + (e && e.message || e) + '）')
+        const msg = aborted ? '（已停止）' : ('（' + (e && e.message || e) + '）')
         const text = this._askId === botId ? this._answer : (this.data.turns.find((t) => t.id === botId) || {}).text
         if (this._botId === botId) this._botId = null
         await this._patchTurn(botId, { text: (text ? text + '\n' : '') + msg, pending: false })
@@ -361,6 +364,9 @@ export default {
     const rec = this._rec
     if (this._stopped || this._draftId || typeof SpeechRecognition === 'undefined') return Promise.resolve()
     if (rec && Date.now() - rec._startAt + ms < MIC_LIFE_MS) return Promise.resolve()
+    // the wearer is talking (speech detected, or words just now): keep this mic, it hears
+    // them (a renewal now would cut the question off), and speech keeps it from timing out
+    if (rec && Date.now() - (rec._voiceAt || 0) < (rec._speaking ? 5000 : 1500)) return Promise.resolve()
     this._dropRec('abort')
     return new Promise((resolve) => {
       this._afterEnd(rec, () => {
@@ -424,10 +430,10 @@ export default {
         if (!t) continue
         log((rec._retired ? 'old ' : '') + (results[i].isFinal ? 'final ' : 'interim ') + t)
         if (rec._retired) continue   // a recognizer we stopped
-        if (results[i].isFinal) this._handleUtterance(t)
+        if (results[i].isFinal) { rec._speaking = false; rec._voiceAt = 0; this._handleUtterance(t) }
         else interim += t
       }
-      if (interim) this._onInterim(interim)
+      if (interim) { rec._voiceAt = Date.now(); this._onInterim(interim) }
     }
     rec.onerror = (e) => log('error ' + (e && (e.error || e.message)))
     rec.onend = () => {
@@ -441,6 +447,8 @@ export default {
     // the rest only for the debug log: when the mic and the speech detector work
     for (const ev of ['audiostart', 'speechstart', 'speechend', 'audioend', 'nomatch']) rec['on' + ev] = () => log(ev)
     rec.onaudiostart = () => { log('audiostart'); if (rec._onAudio) rec._onAudio() }
+    rec.onspeechstart = () => { log('speechstart'); rec._speaking = true; rec._voiceAt = Date.now() }
+    rec.onspeechend = () => { log('speechend'); rec._speaking = false }
     try {
       rec._startAt = Date.now()
       rec.start()
@@ -459,6 +467,8 @@ export default {
     console.log('[asr]', at, msg)
     if (!BRIDGE_CONFIG.debug) return
     this._dbg = (this._dbg || []).concat(at + ' ' + (msg.length > 18 ? msg.slice(0, 18) + '…' : msg)).slice(-4)
+    // one line on the glasses (~75 characters fit): drop the oldest events until it fits
+    while (this._dbg.length > 1 && this._dbg.join(' | ').length > 72) this._dbg.shift()
     this.setData({ hint: this._dbg.join(' | ') })
   },
 
@@ -493,24 +503,24 @@ export default {
   async _handleUtterance(text) {
     const t = (text || '').trim()
     if (!t) return
-    // a question while thinking or reading takes over: the reading stops here, ask()
-    // aborts the old request
+    // a question while thinking or reading takes over at once: the reading stops, and the
+    // old request is stopped and detached before anything is awaited, so no more of its
+    // answer is shown or read
     this._stopSpeaking()
+    if (this._abort) this._abort.abort()
+    this._askId = null
+    this._liveRead = false
     const turn = (this._turn = (this._turn || 0) + 1)
     this._busy = true
     this._readP = null
     this._mark('question')
     await this._commitUserTurn(t)
-    if (this._isExit(t)) {
-      if (this._abort) this._abort.abort()
-      this._endConversation()
-      return
-    }
+    if (this._isExit(t)) { this._endConversation(); return }
     // full screen reads sentence by sentence while the answer streams; speak() at the end
     this._liveRead = BRIDGE_CONFIG.readAloud !== false && this._canPlay()
     const ok = await this.ask(t)
-    this._liveRead = false
     if (turn !== this._turn) return   // a newer question took over while this one streamed
+    this._liveRead = false
     const ans = this._answer
     this._mark('answer')
     if (!ok || !ans) {

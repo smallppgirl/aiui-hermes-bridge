@@ -38,8 +38,10 @@ window.__say = (transcript, isFinal = true) => {
   const s = cur()
   if (s.ended || s.deaf) { log.push('asr.dropped ' + (s.deaf ? 'deaf' : 'ended') + ' ' + transcript); return }
   s.heardAt = Date.now()
+  const ids = { targetId: s.targetId, sessionId: s.sessionId }
+  if (!s.speaking) { s.speaking = true; emit('speech.speechstart', ids) }   // the speech detector, before results
   emit('speech.result', { targetId: s.targetId, sessionId: s.sessionId, resultIndex: s.index, isFinal, alternatives: [{ transcript, confidence: 0.9 }] })
-  if (isFinal) s.index++
+  if (isFinal) { s.index++; s.speaking = false; emit('speech.speechend', ids) }
 }
 Object.defineProperty(window, '__playing', { get: () => playing })
 window.__key = (code) => { view.dispatchInput('keydown', code); view.dispatchInput('keyup', code) }

@@ -123,9 +123,10 @@ setGlobal('fetch', async (url, opts) => {
     const enc = new TextEncoder()
     const chunks = r.chunks.slice()
     // chunkDelay: ms between chunks (a slow stream); an abort rejects the pending read
+    // (with abortError if given: on the glasses it need not be an AbortError)
     resp.body = { getReader: () => ({ read: async () => {
       if (r.chunkDelay) await sleep(r.chunkDelay)
-      if (opts.signal && opts.signal.aborted) throw new DOMException('aborted', 'AbortError')
+      if (opts.signal && opts.signal.aborted) throw r.abortError || new DOMException('aborted', 'AbortError')
       return chunks.length ? { done: false, value: enc.encode(chunks.shift()) } : { done: true }
     } }) }
   }

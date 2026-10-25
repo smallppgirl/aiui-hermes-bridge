@@ -6,7 +6,8 @@
   "dependencies": {},
   "scripts": {
     "test": "node --test --test-timeout=15000 'test/*.test.mjs'",
-    "e2e": "node e2e/run.mjs"
+    "e2e": "node e2e/run.mjs",
+    "e2e:rounds": "node e2e/rounds.mjs"
   },
   "devDependencies": {
     "@yodaos-pkg/ink": "0.18.0",

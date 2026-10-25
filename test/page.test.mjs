@@ -323,6 +323,40 @@ test('a question while thinking cancels the pending answer and asks the new one'
   assert.equal(p.data.status, 'listening')
 })
 
+test('a question while the answer streams: the old request is not retried, even if its abort is not an AbortError', async () => {
+  setTTS('synth', 10)
+  const p = makePage({ config: { readAloud: false } })
+  net.queue.push({ chunks: slow('一', '二', '三', '四', '五', '六').chunks, chunkDelay: 100, abortError: new TypeError('stream closed') })
+  tap(p)
+  lastRec().emit('写一首长诗')
+  await until(() => botLines(p)[0] && botLines(p)[0].length > 0)
+  net.queue.push({ body: sse('二。') })
+  lastRec().emit('算了，一加一等于几')
+  await until(() => botLines(p).length === 2 && !p._busy)
+  await sleep(700)                         // a retry would come 0.5 s after the error
+  assert.deepEqual(net.calls.map((c) => c.body.message[0].text), ['写一首长诗', '算了，一加一等于几'])
+  assert.match(botLines(p)[0], /（已停止）$/)
+  assert.equal(botLines(p)[1], '二。')
+})
+
+test('a question while the answer streams: nothing more of the old answer is read, the new one is', async () => {
+  setTTS('synth', 50)
+  const p = makePage()
+  net.queue.push({ chunks: slow('第一句诗。', '第二句诗。', '第三句诗。', '第四句诗。').chunks, chunkDelay: 60 })
+  tap(p)
+  lastRec().emit('写一首长诗')
+  await until(() => texts().length > 0)
+  const commit = p._commitUserTurn.bind(p)
+  p._commitUserTurn = async (t) => { await sleep(200); return commit(t) }   // a slow render: old chunks keep coming
+  net.queue.push({ body: sse('二。') })
+  const n = texts().length
+  lastRec().emit('算了，一加一等于几')
+  await until(() => botLines(p).length === 2 && !p._busy, 5000)
+  assert.deepEqual(texts().slice(n), ['二。'], 'only the new answer is read')
+  assert.match(botLines(p)[0], /（已停止）$/)
+  assert.equal(p.data.status, 'listening')
+})
+
 test('an exit word while thinking stops the request and ends the conversation', async () => {
   setTTS('synth')
   const p = makePage()
@@ -818,6 +852,24 @@ test('the recognizer times out during reading: a new one opens before the next s
   assert.deepEqual(userLines(p), ['q', '还在听吗'])
 })
 
+test('a mic that is hearing the wearer is not renewed, even when it is old', async () => {
+  setTTS('synth', 50)
+  const p = makePage()
+  net.queue.push({ body: sse('回答。') })
+  tap(p)
+  const rec = lastRec()
+  rec.emit('q')
+  rec._startAt -= 12000                   // old enough to renew...
+  rec.onspeechstart()                     // ...but the wearer just started talking again
+  await until(() => tts.log.includes('play'))
+  assert.equal(recs.length, 1)
+  assert.deepEqual(rec.calls, ['start'])
+  net.queue.push({ body: sse('第二个。') })
+  rec.emit('next')                        // heard on the same mic
+  await until(() => botLines(p).length === 2 && !p._busy)
+  assert.deepEqual(userLines(p), ['q', 'next'])
+})
+
 test('mic renewal: an old recognizer that never ends is given up after 1.5 s', async () => {
   setTTS('synth', 50)
   const p = makePage()
@@ -1023,6 +1075,15 @@ test('debug: recognizer events shown in the hint line', async () => {
   const off = makePage({ config: { debug: false } })
   tap(off)
   assert.equal(off.data.hint, '正在听 · 说完即可')
+})
+
+test('debug: the hint stays on one line, dropping the oldest events', () => {
+  setTTS('synth')
+  const p = makePage({ config: { debug: true } })
+  p._tapAt = Date.now() - 101300                 // long times, as late in a conversation
+  for (const m of ['#12 error network', '#12 audioend', '#12 end', '#13 start', '#13 speechstart']) p._debug(m)
+  assert.ok(p.data.hint.length <= 72, p.data.hint)
+  assert.match(p.data.hint, /#13 speechstart$/)
 })
 
 test('no SpeechRecognition API: tap leaves the page ready', () => {

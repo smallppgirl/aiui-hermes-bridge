@@ -5,7 +5,7 @@ design on `main` with the native assistant's: speaking interrupts, a tap does no
 `voice-gives-way` keeps the tap design (pause, resume, give way) so the two can be
 compared on the glasses; only one of them should be merged. The branch names under
 "Done" say where each change was made. `echo-probe`, the test agent
-(`tools/echo-probe`), is kept apart on purpose. 91 unit tests and the fake e2e pass here,
+(`tools/echo-probe`), is kept apart on purpose. 95 unit tests and the fake e2e pass here,
 and the live e2e passed on 2026-10-26. The e2e host now acts like the glasses in full
 screen: speech at about the real pace, a mic that stops after 16 s without speech, and a
 mic opened while the voice plays is deaf. Question 2 is asked 22 s into a long reading, and
@@ -65,6 +65,20 @@ after the reading. `E2E_DEBUG=1` shows the debug line in the screenshots.
   full ~16 s.
 - Removed: the tap-while-reading path (`_barge`, pause/resume of the voice) and the rule
   that speech during reading is ignored without a tap.
+- A mic that is hearing the wearer (`speechstart`, or interim words in the last 1.5 s) is
+  not renewed: a renewal then would cut the question off.
+- Found by the multi-round e2e (`npm run e2e:rounds`) and fixed, 2026-10-26:
+  - A request cancelled by a newer question was retried 0.5 s later (the runtime's abort
+    mid-stream is not always an `AbortError`), so Hermes got the cancelled question again.
+    Also on `main` and `voice-gives-way`.
+  - A piece of the cancelled answer streamed in while the new question was being shown
+    started a new reading of the cancelled answer, and the new answer was then not read.
+  - The debug line could wrap onto a second line that is cut off; it now keeps to one line.
+- Cost of the renewal: while it runs (about every 10 s of reading, since one sentence of a
+  Hermes answer is often ~10 s), the mic is deaf for ~0.5–0.9 s and the voice is silent.
+  Words started exactly then lose their first syllable or two; the rest is heard.
+- After a reading the mic times out after ~16 s of silence (the screen goes to 就绪); then
+  a tap is needed.
 
 **`take-photo`**
 - When the bridge answers a question with `take_photo` (a question about the scene, like

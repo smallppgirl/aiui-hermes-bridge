@@ -5,8 +5,6 @@ import {
   tap, key, sleep, until, userLines, botLines,
 } from './harness.mjs'
 
-// a tap while reading: the fresh recognizer opens once the old one has ended
-const tapReading = async (p) => { const n = recs.length; tap(p); await until(() => recs.length > n) }
 const idle = (p) => () => !p._busy && (p.data.status === 'listening' || p.data.status === 'ready')
 async function askOnce(p, q, answer = '好的。') {
   net.queue.push({ body: sse(answer) })
@@ -58,7 +56,7 @@ test('UI strings and status chip follow the system language', () => {
   assert.equal(zh.data.chip, '就绪')
   zh._setStatus('speaking')
   assert.equal(zh.data.chip, '播报中')
-  assert.equal(zh.data.hint, '眼镜腿 tap = 提问')
+  assert.equal(zh.data.hint, '直接说话即可打断')
   const en = makePage({ lang: 'en-US' })
   assert.equal(en.data.chip, 'READY')
   en._setStatus('working')
@@ -198,6 +196,7 @@ test('debug: the hint shows the timing of the answer when its voice starts', asy
   const p = makePage({ config: { debug: true } })
   net.queue.push({ body: sse('回答。') })
   tap(p)
+  await sleep(20)   // after the mic's audiostart, which is shown too
   lastRec().emit('q')
   await until(() => tts.log.includes('play'))
   assert.match(p.data.hint, /^text \d+\.\ds · (answer \d+\.\ds · )?synth \d+\.\ds · (answer \d+\.\ds · )?audio \d+\.\ds · playing \d+\.\ds$/)
@@ -307,22 +306,36 @@ test('a tap after the recognizer ended starts a new one and drops the half line'
   assert.equal(p.data.status, 'listening')
 })
 
-test('results while thinking are ignored (one request only)', async () => {
-  setTTS('synth')
+test('a question while thinking cancels the pending answer and asks the new one', async () => {
+  setTTS('synth', 10)
   const p = makePage()
   net.queue.push({ hang: true })
   tap(p)
   lastRec().emit('first')
   await until(() => p.data.status === 'working')
+  net.queue.push({ body: sse('第二个回答') })
   lastRec().emit('second')
-  lastRec().emit('interim', false)
-  await sleep(30)
-  assert.equal(net.calls.length, 1)
-  assert.deepEqual(userLines(p), ['first'])
-  key(p, 'Backspace')
-  await until(() => !p._busy)
+  await until(() => botLines(p).length === 2 && !p._busy)
+  assert.equal(net.calls.length, 2)
+  assert.ok(net.calls[0].opts.signal.aborted, 'the first request was aborted')
+  assert.deepEqual(userLines(p), ['first', 'second'])
+  assert.deepEqual(botLines(p), ['（已停止）', '第二个回答'])
+  assert.equal(p.data.status, 'listening')
 })
 
+test('an exit word while thinking stops the request and ends the conversation', async () => {
+  setTTS('synth')
+  const p = makePage()
+  net.queue.push({ hang: true })
+  tap(p)
+  lastRec().emit('q')
+  await until(() => p.data.status === 'working')
+  lastRec().emit('退出')
+  await until(() => p.data.turns.some((t) => t.role === 'note') && !p._busy)
+  assert.ok(net.calls[0].opts.signal.aborted)
+  assert.equal(net.calls.length, 1)
+  assert.equal(p.data.status, 'ready')
+})
 test('exit word ends the conversation without calling the bridge', async () => {
   setTTS('synth')
   const p = makePage()
@@ -575,7 +588,7 @@ test('card target: speak() reads the whole answer once it is complete', async ()
   assert.deepEqual(texts(), ['第一句。第二句。'])
 })
 
-test('tap + new question while the answer still streams: the old request stops, the new one is read', async () => {
+test('talking while the answer still streams: the old request stops, the new one is read', async () => {
   setTTS('synth', 2000)
   const p = makePage()
   net.queue.push({ chunks: slow('第一句话。', '还在', '继续', '流式', '输出', '中。').chunks, chunkDelay: 150 })
@@ -583,8 +596,6 @@ test('tap + new question while the answer still streams: the old request stops, 
   lastRec().emit('q1')
   await until(() => tts.log.includes('play'))
   assert.ok(!p._answerDone)
-  await tapReading(p)
-  assert.equal(p.data.status, 'listening')
   net.queue.push({ body: sse('新的回答。') })
   lastRec().emit('q2')
   await until(() => botLines(p).length === 2 && texts().includes('新的回答。'))
@@ -597,7 +608,6 @@ test('tap + new question while the answer still streams: the old request stops, 
   key(p, 'Backspace')
   await until(() => !p._busy)
 })
-
 test('the request fails after reading started: the reading stops, the error is shown', async () => {
   setTTS('synth', 2000)
   const p = makePage()
@@ -689,120 +699,171 @@ test('readAloud=false: no speech, listening resumes', async () => {
   assert.equal(p.data.status, 'listening')
 })
 
-// ---------------- temple tap / recognizer lifecycle ----------------
+// ---------------- talking over the reading / recognizer lifecycle ----------------
 
 const plays = () => tts.log.filter((l) => l === 'play').length
+const reading = (p) => () => p.data.status === 'speaking' && tts.log.includes('play')
+const SENT = '这是第一句话。'   // ~2.2 s of speech (estimated): five fit in one segment
 
-test('tap while reading pauses the voice until the new mic is open, then reads on; the next question ends the reading', async () => {
+test('talking over the reading stops it at the first words; the question is asked', async () => {
   setTTS('synth', 2000)
   const p = makePage()
-  net.queue.push({ body: sse('很长的回答') })
+  net.queue.push({ body: sse('很长的回答。') })
   tap(p)
   const rec = lastRec()
   rec.emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  tap(p)
-  assert.equal(p.data.status, 'listening')
-  assert.ok(p._tts, 'still reading')
-  assert.ok(tts.log.includes('player.stop'), 'paused')
-  assert.equal(recs.length, 1)            // not before the old one let go of the mic
-  await until(() => recs.length === 2)    // a fresh recognizer...
-  assert.equal(plays(), 1)                // ...and the voice only after it
-  assert.deepEqual(rec.calls, ['start', 'abort'])
-  rec.emit('stale')                       // the old one is ignored
-  await until(() => plays() === 2)        // the voice reads on
-  assert.equal(tts.utterances.at(-1).text, '很长的回答')
-  const rec2 = lastRec()
-  net.queue.push({ body: sse('第二个回答') })
-  const stops = tts.log.filter((l) => l === 'player.stop').length
-  rec2.emit('nex', false)                 // the question streams in while the voice goes on
+  await until(reading(p))
+  net.queue.push({ body: sse('第二个回答。') })
+  rec.emit('nex', false)                  // the first words: the voice stops for good
+  assert.ok(tts.log.includes('player.stop'))
+  assert.equal(p._tts, null)
   await sleep(10)
-  assert.ok(p._tts)
-  assert.equal(tts.log.filter((l) => l === 'player.stop').length, stops)
   assert.deepEqual(userLines(p), ['q', 'nex'])
-  rec2.emit('next')                       // final: stops the reading, asks
-  assert.equal(tts.log.filter((l) => l === 'player.stop').length, stops + 1)
+  rec.emit('next')                        // final: asks
   await until(() => botLines(p).length === 2 && !p._busy)
   assert.deepEqual(userLines(p), ['q', 'next'])
-  assert.deepEqual(botLines(p), ['很长的回答', '第二个回答'])
+  assert.deepEqual(botLines(p), ['很长的回答。', '第二个回答。'])
+  assert.equal(plays(), 2, 'answer 1 is not read on')
+  assert.equal(recs.length, 1, 'the same recognizer')
 })
 
-test('without a tap, speech during reading is still ignored', async () => {
-  setTTS('synth', 300)
+test('a few words over the reading, then nothing: the reading stays stopped, back to listening', async () => {
+  setTTS('synth', 2000)
   const p = makePage()
-  net.queue.push({ body: sse('很长的回答') })
+  net.queue.push({ body: sse('很长的回答。') })
   tap(p)
   lastRec().emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  lastRec().emit('something else entirely')
+  await until(reading(p))
+  lastRec().emit('嗯', false)
   await until(idle(p))
-  assert.deepEqual(userLines(p), ['q'])
+  assert.equal(p.data.status, 'listening')
+  assert.equal(p._tts, null)
   assert.equal(net.calls.length, 1)
+  assert.equal(plays(), 1)
 })
 
-test('tap while reading: an old recognizer that never ends is given up after 1.5 s', async () => {
-  setTTS('synth', 4000)
+test('a tap while reading changes nothing', async () => {
+  setTTS('synth', 300)
   const p = makePage()
-  net.queue.push({ body: sse('很长的回答') })
+  net.queue.push({ body: sse('回答。') })
+  tap(p)
+  lastRec().emit('q')
+  await until(reading(p))
+  tap(p)
+  tap(p)
+  assert.equal(p.data.status, 'speaking')
+  assert.equal(recs.length, 1)
+  assert.ok(!tts.log.includes('player.stop'))
+  await until(idle(p))
+  assert.equal(plays(), 1)
+  assert.equal(p.data.status, 'listening')
+})
+
+test('segments: whole sentences, as many as fit in ~8 s of speech', () => {
+  const p = makePage()
+  const t = SENT.repeat(6)
+  assert.equal(p._segmentEnd(t, 0, t.length, true), 35)        // five sentences
+  assert.equal(p._segmentEnd(t, 35, t.length, true), 42)       // the last one
+  assert.equal(p._segmentEnd(t, 0, 14, true), 14)              // only what is complete
+  const long = '这一句话非常非常长'.repeat(5) + '。后面'
+  assert.equal(p._segmentEnd(long, 0, long.length - 2, true), long.length - 2)   // one long sentence
+  assert.equal(p._segmentEnd('第一句。没有句号', 0, 8, true), 8)   // the unfinished end, once complete
+  assert.equal(p._segmentEnd('第一句', 0, 0, true), 0)          // nothing complete yet
+})
+
+test('a long answer is read in segments of at most ~8 s', async () => {
+  setTTS('synth', 10)
+  const p = makePage()
+  await askOnce(p, 'q', SENT.repeat(12))
+  assert.deepEqual(texts(), [SENT.repeat(5), SENT.repeat(5), SENT.repeat(2)])
+})
+
+test('an old mic is renewed before the next segment, and the voice waits until it captures', async () => {
+  setTTS('synth', 50)
+  const p = makePage()
+  net.queue.push({ body: sse(SENT.repeat(8)) })
+  tap(p)
+  const rec = lastRec()
+  rec._startAt -= 9000                    // 9 s old + the next segment: past ~13 s
+  rec.emit('q')
+  await until(() => tts.log.includes('play'))
+  assert.deepEqual(rec.calls, ['start', 'abort'])
+  assert.equal(recs.length, 2)
+  assert.ok(Date.now() - recs[1]._startAt >= 300, 'played 0.3 s after the new mic captured')
+  rec.emit('stale')                       // the old one is ignored
+  await until(idle(p))
+  assert.equal(recs.length, 2, 'the fresh one lasts the rest of the reading')
+  assert.equal(plays(), 2)
+  assert.deepEqual(userLines(p), ['q'])
+  assert.equal(p.data.status, 'listening')
+})
+
+test('the recognizer times out during reading: a new one opens before the next segment', async () => {
+  setTTS('synth', 200)
+  const p = makePage()
+  net.queue.push({ body: sse(SENT.repeat(6)) })
   tap(p)
   const rec = lastRec()
   rec.emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  rec.abort = () => rec.calls.push('abort')   // no end event
-  tap(p)
-  tap(p)                                      // a second tap while waiting adds nothing
-  await sleep(1200)
-  assert.equal(recs.length, 1)
-  await until(() => recs.length === 2)
-  await sleep(50)
+  await until(reading(p))
+  rec._startAt -= 6000
+  rec.onend()                             // timed out
+  assert.equal(p._rec, null)
+  assert.equal(p.data.status, 'speaking')
+  await until(() => plays() === 2)
   assert.equal(recs.length, 2)
-  assert.equal(p.data.status, 'listening')
-  key(p, 'Backspace')
-  await until(() => !p._busy)
+  net.queue.push({ body: sse('答。') })
+  recs[1].emit('还在听吗')                // heard during the second segment
+  await until(() => botLines(p).length === 2 && !p._busy)
+  assert.deepEqual(userLines(p), ['q', '还在听吗'])
 })
 
-test('Backspace while waiting for the old recognizer: no new one opens', async () => {
-  setTTS('synth', 2000)
+test('mic renewal: an old recognizer that never ends is given up after 1.5 s', async () => {
+  setTTS('synth', 50)
   const p = makePage()
-  net.queue.push({ body: sse('很长的回答') })
+  net.queue.push({ body: sse('回答。') })
   tap(p)
-  lastRec().emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  const rec = lastRec()
+  rec.abort = () => rec.calls.push('abort')   // no end event
+  rec._startAt -= 12000
+  const t0 = Date.now()
+  rec.emit('q')
+  await until(() => recs.length === 2, 3000)
+  assert.ok(Date.now() - t0 >= 1400)
+  assert.equal(plays(), 0, 'the voice waits for the new mic')
+  await until(idle(p))
+  assert.equal(plays(), 1)
+})
+
+test('Backspace while the mic is renewed: no new one opens', async () => {
+  setTTS('synth', 50)
+  const p = makePage()
+  net.queue.push({ body: sse('回答。') })
   tap(p)
+  const rec = lastRec()
+  rec.abort = () => rec.calls.push('abort')   // no end event
+  rec._startAt -= 12000
+  rec.emit('q')
+  await until(() => p._waitRec)
   key(p, 'Backspace')
-  await sleep(50)
+  await sleep(1700)
   assert.equal(recs.length, 1)
   assert.equal(p._rec, null)
+  assert.equal(p.data.status, 'ready')
 })
 
-test('tap while reading, then silence: reading finishes, then keeps listening', async () => {
-  setTTS('synth', 150)
+test('after a reading, an old mic is renewed for the next question', async () => {
+  setTTS('synth', 30)
   const p = makePage()
-  net.queue.push({ body: sse('回答') })
+  net.queue.push({ body: sse('回答。') })
   tap(p)
-  lastRec().emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  tap(p)
-  await until(() => !p._tts && !p._busy)
-  assert.equal(plays(), 2, 'paused, then read to the end')
+  const rec = lastRec()
+  rec._startAt -= 5000                    // fine for the reading, too old to wait for a question
+  rec.emit('q')
+  await until(() => idle(p)() && recs.length === 2)
+  assert.deepEqual(rec.calls, ['start', 'abort'])
+  assert.equal(plays(), 1)
   assert.equal(p.data.status, 'listening')
-  assert.equal(p._barge, false)
-})
-
-test('after a pause the voice goes on from the start of the sentence it was in', async () => {
-  setTTS('synth', 2000)
-  tts.cues = [{ charIndex: 5, charLength: 2 }]   // inside the second sentence, at 1 s
-  const p = makePage()
-  net.queue.push({ body: sse('第一句。第二句很长。第三句。') })
-  tap(p)
-  lastRec().emit('q')
-  await until(() => tts.log.includes('play'))
-  await sleep(1100)
-  await tapReading(p)
-  await until(() => plays() === 2)
-  assert.equal(tts.utterances.at(-1).text, '第二句很长。第三句。')
-  key(p, 'Backspace')
-  await until(() => !p._busy)
 })
 
 test('a recognizer that ends long after its start timed out: no more "listening"', async () => {
@@ -819,25 +880,6 @@ test('a recognizer that ends long after its start timed out: no more "listening"
   assert.equal(p._rec, null)
   tap(p)                                    // a tap opens a new one
   assert.equal(recs.length, 2)
-  assert.equal(p.data.status, 'listening')
-})
-
-test('the recognizer times out during reading: back to speaking, a mic opens after it', async () => {
-  setTTS('synth', 300)
-  const p = makePage()
-  net.queue.push({ body: sse('回答。') })
-  tap(p)
-  const rec = lastRec()
-  rec.emit('q')
-  await until(() => tts.log.includes('play'))
-  await tapReading(p)
-  const rec2 = lastRec()
-  assert.equal(p.data.status, 'listening')
-  rec2._startAt -= 6000
-  rec2.onend()
-  assert.equal(p.data.status, 'speaking')
-  await until(() => !p._busy)
-  assert.equal(recs.length, 3)              // opened after the reading
   assert.equal(p.data.status, 'listening')
 })
 
@@ -860,54 +902,46 @@ test('debug: the hint shows the last four recognizer and voice events, numbered 
   const p = makePage({ config: { debug: true } })
   net.queue.push({ body: sse('月球是地球唯一的天然卫星。') })
   tap(p)
+  await sleep(20)
   lastRec().emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+  await until(reading(p))
   assert.ok(p._dbg.some((d) => / voice 13$/.test(d)), p._dbg.join(' | '))
-  await tapReading(p)
   lastRec().emit('月球有多', false)
-  recs[0].emit('旧的')
   const parts = p.data.hint.split(' | ')
   assert.equal(parts.length, 4)
-  assert.match(parts[0], /^0\.0 #1 end$/)
-  assert.match(parts[1], /^0\.0 #2 start$/)
-  assert.match(parts[2], /^0\.0 #2 interim 月球有多$/)
-  assert.match(parts[3], /^0\.0 #1 old final 旧的$/)
-  assert.deepEqual(userLines(p), ['q', '月球有多'])   // the old recognizer is only logged
+  assert.match(parts[0], /^0\.0 #1 audiostart$/)
+  assert.match(parts[1], /^0\.0 #1 final q$/)
+  assert.match(parts[2], /^0\.0 voice 13$/)
+  assert.match(parts[3], /^0\.0 #1 interim 月球有多$/)
+  assert.deepEqual(userLines(p), ['q', '月球有多'])
   key(p, 'Backspace')
   await until(() => !p._busy)
 })
-
-test('tap while reading, then an exit word ends the conversation', async () => {
+test('an exit word over the reading ends the conversation', async () => {
   setTTS('synth', 2000)
   const p = makePage()
   net.queue.push({ body: sse('回答里也有停止两个字') })
   tap(p)
   lastRec().emit('q')
-  await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
-  await tapReading(p)
+  await until(reading(p))
   lastRec().emit('停止')
   await until(() => p.data.status === 'ready')
   assert.ok(tts.log.includes('player.stop'))
   assert.equal(p._rec, null)
   assert.equal(net.calls.length, 1)
 })
-
-test('tap while reading with speak() (no stop API) listens, the question still works', async () => {
+test('card speak() (no stop API): a question over the reading still works', async () => {
   setTTS('speak-noend')
   const p = makePage()
   net.queue.push({ body: sse('回答') })
   tap(p)
   lastRec().emit('q')
   await until(() => p.data.status === 'speaking')
-  await tapReading(p)
-  assert.equal(p.data.status, 'listening')
-  assert.ok(p._tts)
   net.queue.push({ body: sse('第二个') })
   lastRec().emit('next')
   await until(() => botLines(p).length === 2)
   assert.deepEqual(userLines(p), ['q', 'next'])
 })
-
 test('tap while thinking is ignored', async () => {
   setTTS('synth')
   const p = makePage()
@@ -1042,7 +1076,7 @@ test('onUnload cleans up recognizer, request, speech and timers', async () => {
 
 for (const mode of ['entity', 'binding']) {
   test(`[${mode}] streaming keeps the question at the top; reading scrolls to the end`, async () => {
-    setTTS('synth', 1500)
+    setTTS('synth', 250)   // per segment (~5 s of speech each)
     const p = makePage({ scroll: mode })
     const long = '这是一个很长的回答。'.repeat(60)   // ~600 chars, several screens
     tts.cues = Array.from({ length: 10 }, (_, i) => ({ charIndex: i * 60, charLength: 60 }))
@@ -1075,6 +1109,27 @@ for (const mode of ['entity', 'binding']) {
     assert.ok(Math.abs(p._turnStart - before) <= 1, `turnStart ${p._turnStart} vs ${before}`)
     assert.ok(p.sv.scrollTop <= p._turnStart, 'question start not scrolled past')
     assert.ok(p.sv.scrollTop >= p._turnStart - p.sv.clientHeight, 'question visible')
+    key(p, 'Backspace')
+    await until(() => !p._busy)
+  })
+
+  test(`[${mode}] talking over the reading jumps to the bottom, where the question appears`, async () => {
+    setTTS('synth', 3000)
+    const p = makePage({ scroll: mode })
+    net.queue.push({ body: sse('这是一个很长的回答。'.repeat(40)) })
+    tap(p)
+    lastRec().emit('q')
+    await until(() => p.data.status === 'speaking' && tts.log.includes('play'))
+    await sleep(100)
+    key(p, 'ArrowUp')                       // swiped back to read: the view stays there...
+    await sleep(20)
+    lastRec().emit('新的问题', false)       // ...until the wearer talks
+    await sleep(150)
+    const max = p.sv.scrollHeight - p.sv.clientHeight
+    assert.ok(max > 0)
+    assert.ok(p.sv.scrollTop >= max - 1, `at the bottom: ${p.sv.scrollTop} of ${max}`)
+    assert.equal(p.data.turns.at(-1).text, '新的问题')
+    assert.equal(p._tts, null)
     key(p, 'Backspace')
     await until(() => !p._busy)
   })

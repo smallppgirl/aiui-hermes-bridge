@@ -42,7 +42,12 @@ for (const name of ['clearTimeout', 'clearInterval']) {
 export const recs = []
 export class FakeRec {
   constructor() { recs.push(this); this.alive = false; this.calls = [] }
-  start() { if (FakeRec.failStart) throw new Error('not-allowed'); this.alive = true; this.calls.push('start') }
+  start() {
+    if (FakeRec.failStart) throw new Error('not-allowed')
+    this.alive = true
+    this.calls.push('start')
+    setTimeout(() => this.alive && this.onaudiostart && this.onaudiostart(), 10)   // the mic captures
+  }
   stop() { this.alive = false; this.calls.push('stop'); setTimeout(() => this.onend && this.onend(), 5) }
   abort() { this.alive = false; this.calls.push('abort'); setTimeout(() => this.onend && this.onend(), 5) }
   emit(t, isFinal = true) { this.onresult({ resultIndex: 0, results: [Object.assign([{ transcript: t }], { isFinal })] }) }

@@ -11,6 +11,9 @@ const MAX_TURNS = 20      // keep the on-screen dialog bounded
 const MAX_ANSWER = 20000  // cap a single answer's displayed text
 const HAN = /[㐀-鿿豈-﫿]/g
 const count = (s, re) => ((s || '').match(re) || []).length
+const SENTENCE_END = () => /(?:[。！？!?；…]+|[.;](?=\s)|\n)["'”’」』）)]*/g
+const SEGMENT_MS = 8000    // longest stretch of speech read in one go (estimated)
+const MIC_LIFE_MS = 13000  // renew the mic before it reaches ~16 s without speech
 
 export default {
   data: {
@@ -211,7 +214,11 @@ export default {
   // print the question as it is being recognized
   _onInterim(text) {
     const t = (text || '').trim()
-    if ((this._busy && !this._barge) || !t) return
+    if (!t) return
+    // the wearer talks over the reading: it stops for good, so the end of the question is
+    // found right away. The glasses cancel their own voice in the mic (measured with the
+    // echo probe on branch echo-probe), so this is the wearer.
+    if (this._tts) this._stopSpeaking()
     if (this._draftId) this._patchTurn(this._draftId, { text: t }).then(() => this._follow())
     else this._openUserTurn(t, true)
   },
@@ -336,36 +343,35 @@ export default {
   },
 
   // ---- continuous voice conversation (one tap, mic stays hot, no per-turn tap) ----
-  // temple tap: (re)start listening. While reading, the voice keeps going (like the
-  // native assistant) and the mic takes the next question, which then ends the reading.
-  // The glasses cancel their own voice in the mic (measured with the echo probe on branch echo-probe), so
-  // nothing needs filtering. A tap is a user gesture, so the mic may always open here.
+  // temple tap: start listening. While thinking or reading it changes nothing: the mic is
+  // already on and the wearer just talks to interrupt (like the native assistant).
+  // A tap is a user gesture, so the mic may always open here.
   captureAndAsk() {
     const rec = this._rec
     this._tapAt = Date.now()
     this._debug('tap ' + (!rec ? 'none' : rec._ended ? 'ended' : 'live') + (this._tts ? ' reading' : ''))
-    if (this._tts) {
-      this._barge = true
-      if (this._waitRec) return   // a fresh recognizer is already on its way
-      // a fresh recognizer: the one from the question may have stopped hearing during
-      // a long answer without reporting it. The old one releases the mic only when it
-      // ends (~0.4 s on the glasses); one started before that hears nothing.
-      // A recognizer opened while the voice plays hears nothing (seen on the glasses;
-      // one opened before the voice hears the user fine), so the voice pauses until
-      // the mic is open and then goes on from the start of its sentence.
-      const old = this._rec
-      const tts = this._tts
-      this._dropRec('abort')
-      const paused = tts.pause()
-      this._afterEnd(old, () => {
-        if (this._stopped) return
+    if (!this._busy && !this._waitRec) this._startListening()   // _waitRec: a new mic is on its way
+  },
+
+  // a mic that hears the wearer for the next ms. A recognizer stops hearing ~16 s after it
+  // opens without speech, and one opened while the voice plays hears nothing, so an old
+  // one is replaced now, before the voice goes on. Resolves once the new one captures
+  // (0.3 s after audiostart, or after 1 s without that event).
+  _micFor(ms) {
+    const rec = this._rec
+    if (this._stopped || this._draftId || typeof SpeechRecognition === 'undefined') return Promise.resolve()
+    if (rec && Date.now() - rec._startAt + ms < MIC_LIFE_MS) return Promise.resolve()
+    this._dropRec('abort')
+    return new Promise((resolve) => {
+      this._afterEnd(rec, () => {
+        if (this._stopped) return resolve()
         this._startListening()
-        if (!this._rec) this._setStatus(this._tts ? 'speaking' : 'ready')
-        if (paused) setTimeout(() => { if (this._tts === tts) tts.resume() }, 300)
+        const fresh = this._rec
+        if (!fresh) return resolve()
+        const timer = setTimeout(resolve, 1000)
+        fresh._onAudio = () => { fresh._onAudio = null; clearTimeout(timer); setTimeout(resolve, 300) }
       })
-      return this._setStatus('listening')
-    }
-    if (!this._busy) this._startListening()   // still thinking: ignore
+    })
   },
 
   // run fn once rec has ended (or after 1.5 s if it never reports it)
@@ -434,6 +440,7 @@ export default {
     }
     // the rest only for the debug log: when the mic and the speech detector work
     for (const ev of ['audiostart', 'speechstart', 'speechend', 'audioend', 'nomatch']) rec['on' + ev] = () => log(ev)
+    rec.onaudiostart = () => { log('audiostart'); if (rec._onAudio) rec._onAudio() }
     try {
       rec._startAt = Date.now()
       rec.start()
@@ -468,31 +475,37 @@ export default {
     if (BRIDGE_CONFIG.debug) this.setData({ hint: m.list.slice(1).join(' · ') })
   },
 
-  // the recognizer stopped hearing: say so (a tap opens a new one)
+  // the recognizer stopped hearing: say so (a tap opens a new one; during a reading a new
+  // one opens before the next segment)
   _recTimedOut() {
     this._rec = null
-    this._barge = false
     if (!this._busy) this._setStatus('ready')
     else if (this.data.status === 'listening') this._setStatus(this._tts ? 'speaking' : 'working')
   },
 
-  // after an answer: keep listening on the recognizer we own; if it timed out during a
-  // long answer, open a new one (outside a tap: if the glasses refuse, back to ready)
+  // after an answer: keep listening, on a fresh recognizer if this one timed out or would
+  // soon (outside a tap: if the glasses refuse, back to ready)
   _resumeListening() {
-    if (!this._rec && !this._stopped) this._startListening()
-    this._setStatus(this._rec ? 'listening' : 'ready')
+    if (!this._stopped) this._micFor(10000)
+    this._setStatus(this._rec || this._waitRec ? 'listening' : 'ready')
   },
 
   async _handleUtterance(text) {
     const t = (text || '').trim()
-    if ((this._busy && !this._barge) || !t) return
-    if (this._barge) this._stopSpeaking()   // a question asked while reading ends the reading
+    if (!t) return
+    // a question while thinking or reading takes over: the reading stops here, ask()
+    // aborts the old request
+    this._stopSpeaking()
     const turn = (this._turn = (this._turn || 0) + 1)
     this._busy = true
     this._readP = null
     this._mark('question')
     await this._commitUserTurn(t)
-    if (this._isExit(t)) { this._endConversation(); return }
+    if (this._isExit(t)) {
+      if (this._abort) this._abort.abort()
+      this._endConversation()
+      return
+    }
     // full screen reads sentence by sentence while the answer streams; speak() at the end
     this._liveRead = BRIDGE_CONFIG.readAloud !== false && this._canPlay()
     const ok = await this.ask(t)
@@ -508,13 +521,12 @@ export default {
       return this._setStatus('ready')
     }
     if (BRIDGE_CONFIG.readAloud !== false) {
-      // speech while reading is ignored unless a tap asked for it (so talk nearby does not cut it off)
-      if (!this._barge) this._setStatus('speaking')
+      this._setStatus('speaking')
       const interrupted = await (this._readP || this._speak())
-      if (interrupted) return   // a new question took over
+      if (turn !== this._turn) return   // a new question took over
       this._stopReadScroll()
       if (!this._draftId) this._turnStart = null   // keep it for a question being spoken
-      this._scrollToEnd()
+      if (!interrupted) this._scrollToEnd()   // interrupted: the question line is in view
     } else {
       this._startReadScroll(this._estimateSpeechMs(ans, this._isChinese(ans)) * 0.7)
       this._turnStart = null
@@ -528,8 +540,9 @@ export default {
   // (AIUI ignores utterance.lang; only the voice id selects the language).
   // Prefers synthesize() + SpeechAudioPlayer: it can be stopped, reports when
   // playback really ends, and gives subtitle positions to pace the scrolling. It reads
-  // in segments while the answer streams: each one is every complete sentence not read
-  // yet, so the voice starts after the first sentence instead of after the whole answer.
+  // in segments while the answer streams: each one is the complete sentences not read yet
+  // (at most SEGMENT_MS), so the voice starts after the first sentence instead of after
+  // the whole answer, and the mic can be renewed in the gaps.
   // speak() has no stop and its end event may never fire, so it is the fallback: it
   // reads the rest of the answer in one go once the answer is complete.
   _speak() {
@@ -541,12 +554,9 @@ export default {
       let pos = 0   // read up to here in this._full
       const tts = {
         more: null,                         // set while waiting for more streamed text
-        pause: () => false,                 // stop the voice for now (see below)
-        resume: () => {},
         finish: (interrupted) => {
           if (this._tts !== tts) return
           this._tts = this._ttsProgress = null
-          this._barge = false
           if (timer) clearTimeout(timer)
           resolve(!!interrupted)
         },
@@ -580,7 +590,8 @@ export default {
       const next = () => {
         if (this._tts !== tts) return
         tts.more = null
-        const end = this._answerDone ? this._full.length : this._sentenceEnd(this._full, pos)
+        const limit = this._answerDone ? this._full.length : this._sentenceEnd(this._full, pos)
+        const end = this._segmentEnd(this._full, pos, limit, zh)
         if (end <= pos) {
           if (this._answerDone) return tts.finish(false)
           tts.more = next
@@ -590,10 +601,12 @@ export default {
         const text = this._full.slice(start, end)
         pos = end
         if (!text.trim()) return next()
-        arm(this._estimateSpeechMs(text, zh) * 1.5 + 8000)   // safety net only; onEnded normally ends it
+        const est = this._estimateSpeechMs(text, zh)
+        const micReady = this._micFor(est)   // renewed while the segment is generated
+        arm(est * 1.5 + 9000)   // safety net only; onEnded normally ends it
         this._mark('synth')
         this._debug('voice ' + text.length)
-        const seg = (tts.seg = { start, at: start })
+        const seg = (tts.seg = { start })
         speechSynthesis.synthesize(utterance(text), { subtitles: 'sentence' }).then((task) => {
           if (this._tts !== tts || tts.seg !== seg) { try { task.abort() } catch (_) {} return }
           const player = (tts.player = new SpeechAudioPlayer(task, { trackMode: 'hidden' }))
@@ -613,8 +626,11 @@ export default {
           player.audioPlayer.onCanplay(() => {
             if (this._tts !== tts || tts.player !== player) return
             this._mark('audio')
-            try { player.play(); this._mark('playing') } catch (_) { return fallback() }
-            readScroll()
+            micReady.then(() => {
+              if (this._tts !== tts || tts.player !== player) return
+              try { player.play(); this._mark('playing') } catch (_) { return fallback() }
+              readScroll()
+            })
           })
           player.audioPlayer.onEnded(() => { if (tts.player === player) { this._debug('voice end'); done(); next() } })
           task.onerror = () => { if (tts.player === player) { done(); next() } }
@@ -625,28 +641,11 @@ export default {
           player.textTrack.addEventListener('cuechange', () => {
             const cue = player.textTrack.activeCues.item(0)
             if (tts.player === player && cue && Number.isInteger(cue.charIndex)) {
-              seg.at = start + cue.charIndex
               this._ttsProgress = (start + cue.charIndex + (cue.charLength || 0) / 2) / Math.max(1, this._full.length)
             }
           })
         }).catch(() => { if (tts.seg === seg) { tts.seg = null; pos = start; speakSimple() } })
       }
-      // pause: stop the segment being read (or about to be) and go back to the start
-      // of the sentence it was in; resume reads on from there
-      tts.pause = () => {
-        const seg = tts.seg
-        if (!seg) return false   // nothing playing (between segments or waiting for text)
-        tts.seg = tts.more = null
-        if (timer) clearTimeout(timer)
-        try { if (tts.player) tts.player.stop() } catch (_) {}
-        try { if (tts.task && tts.task.state === 'running') tts.task.abort() } catch (_) {}
-        try { if (tts.player) tts.player.destroy() } catch (_) {}
-        tts.player = tts.task = null
-        pos = this._sentenceEnd(this._full.slice(0, seg.at), seg.start)
-        this._debug('voice pause')
-        return true
-      }
-      tts.resume = () => { if (this._tts === tts && !tts.seg) next() }
       if (!this._canPlay()) return speakSimple()
       next()
     })
@@ -665,11 +664,26 @@ export default {
 
   // end of the last complete sentence after `from` (or `from` if there is none yet)
   _sentenceEnd(text, from) {
-    const re = /(?:[。！？!?；…]+|[.;](?=\s)|\n)["'”’」』）)]*/g
+    const re = SENTENCE_END()
     re.lastIndex = from
     let end = from
     for (let m; (m = re.exec(text));) end = m.index + m[0].length
     return end
+  },
+
+  // end of the next segment to read, from `from` up to `limit`: whole sentences, as many
+  // as fit in SEGMENT_MS of speech (at least one)
+  _segmentEnd(text, from, limit, zh) {
+    const re = SENTENCE_END()
+    re.lastIndex = from
+    let end = from
+    for (let m; (m = re.exec(text)) && m.index + m[0].length <= limit;) {
+      const e = m.index + m[0].length
+      if (end > from && this._estimateSpeechMs(text.slice(from, e), zh) > SEGMENT_MS) return end
+      end = e
+    }
+    // the rest after the last sentence end (an unfinished end, once the answer is complete)
+    return end === from || this._estimateSpeechMs(text.slice(from, limit), zh) <= SEGMENT_MS ? limit : end
   },
 
   // stop reading aloud now (interrupted = true when the user tapped)
@@ -820,14 +834,14 @@ export default {
       chipReady: '就绪', chipListening: '聆听中', chipThinking: '思考中', chipSpeaking: '播报中',
       idle: '轻按眼镜腿开始对话', say: '请讲…', thinking: '正在思考…',
       talk: '说话', hintIdle: '眼镜腿 tap = 开始 · 说「退出」结束',
-      hintListening: '正在听 · 说完即可', hintWorking: '请稍候', hintSpeaking: '眼镜腿 tap = 提问',
+      hintListening: '正在听 · 说完即可', hintWorking: '请稍候', hintSpeaking: '直接说话即可打断',
       ended: '（会话已结束）',
       photo: '正在拍照…', photoFailed: '拍照失败：', photoFullScreen: '拍照需要全屏：双击卡片进入全屏后再问',
     } : {
       chipReady: 'READY', chipListening: 'LISTENING', chipThinking: 'THINKING', chipSpeaking: 'SPEAKING',
       idle: 'Tap the temple to start', say: 'Your turn…', thinking: 'Thinking…',
       talk: 'Talk', hintIdle: 'temple tap = start · say "exit" to stop',
-      hintListening: 'listening · just speak', hintWorking: 'one moment', hintSpeaking: 'temple tap = ask',
+      hintListening: 'listening · just speak', hintWorking: 'one moment', hintSpeaking: 'just talk to interrupt',
       ended: '(conversation ended)',
       photo: 'Taking a photo…', photoFailed: 'photo failed: ', photoFullScreen: 'photos need full screen: double-tap the card, then ask again',
     }

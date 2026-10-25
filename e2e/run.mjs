@@ -142,25 +142,20 @@ for (const c of CASES) {
   if (LIVE) check(needsScroll, `answer 1 is long enough to need scrolling (${ans1.length} chars)`)
   if (needsScroll) check(!reading0.equals(reading1), 'text scrolls while the answer is read')
 
-  // ---- tap while reading: the voice pauses while the mic opens, then goes on; question 2 (other language) ----
+  // ---- talk over the reading (no tap needed): the first words stop it; question 2 (other language) ----
   const stops = () => trace.filter((l) => l.includes('[tts] stop')).length
   const stops0 = stops()
-  const ttsTap = await ttsCount()
-  await key('GlobalHook')
-  await wait(1500)
-  await shot('tap-listening')
+  await key('GlobalHook')    // a tap while reading changes nothing
+  await wait(500)
+  await shot('tap-while-reading')
   check(stops() === stops0, 'temple tap keeps the voice reading')
-  const tts1 = await ttsCount()   // speech requests of answer 1 (one per segment, plus the one after the pause)
-  if (method === 'tts.synth') check(tts1 > ttsTap, `the voice reads on after the mic opened (${tts1 - ttsTap} request(s) after the tap)`)
   answers.push({ text: a2, delay: 500 })
   await say(q2.slice(0, 5), false)
-  await wait(300)
+  await wait(150)
+  check(stops() > stops0, 'the first words of question 2 stop the reading of answer 1')
+  const tts1 = await ttsCount()   // speech requests of answer 1 (one per segment)
   await shot('question-2-live')
-  const sessions = await pg.evaluate(() => __asr.sessions.length)
-  await say(q2)              // only accepted if the tap really switched to listening
-  await wait(100)
-  check(stops() > stops0, 'question 2 ends the reading of answer 1')
-  check(sessions >= 2, `the tap during reading opened a fresh mic session (${sessions} sessions)`)
+  await say(q2)
   await wait(300)
   await shot('question-2-thinking')
   const read2 = await untilReading(tts1, 'answer-2-streaming')

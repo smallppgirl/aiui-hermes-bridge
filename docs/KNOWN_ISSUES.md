@@ -1,11 +1,12 @@
 # Status and known issues
 
-As of 2026-10-25. Everything below is merged into `main`; the branch names under "Done"
-say where each change was made (those branches are deleted). The only other branch is
-`echo-probe`, the test agent (`tools/echo-probe`), kept apart on purpose. 84 unit tests and
-the fake e2e pass on `main`; the live e2e (`npm run e2e -- --live`) last passed on
-`pause-to-listen`. `debug` is off on `main`: set `debug: true` in `config.js` for the
-event log on the glasses.
+As of 2026-10-25. This branch, `talk-to-interrupt`, replaces the tap-while-reading
+design on `main` with the native assistant's: speaking interrupts, a tap does not.
+`voice-gives-way` keeps the tap design (pause, resume, give way) so the two can be
+compared on the glasses; only one of them should be merged. The branch names under
+"Done" say where each change was made. `echo-probe`, the test agent
+(`tools/echo-probe`), is kept apart on purpose. 91 unit tests and the fake e2e pass here.
+`debug` is off: set `debug: true` in `config.js` for the event log on the glasses.
 
 ## Done
 
@@ -46,6 +47,20 @@ event log on the glasses.
   stopped hearing during a long answer without reporting it).
 - With `debug: true` the hint shows the last 3 recognizer events.
 
+**`talk-to-interrupt`** (to compare with `voice-gives-way`)
+- Speaking during a reading stops it at the first interim words for good (no pause and
+  resume); the question line opens at the bottom and the view jumps there, even after a
+  swipe back. Speaking while thinking cancels the pending answer and asks the new
+  question; an exit word then also stops the request.
+- A tap during thinking or reading changes nothing; the swipe only scrolls.
+- Segments are capped at ~8 s of estimated speech. Before each segment, a mic that would
+  pass ~13 s (or has timed out) is replaced; the voice waits until the new one captures
+  (0.3 s after `audiostart`, at most 1 s without it; the old one gets 1.5 s to let go).
+  After a reading, a mic older than ~3 s is replaced too, so the next question gets a
+  full ~16 s.
+- Removed: the tap-while-reading path (`_barge`, pause/resume of the voice) and the rule
+  that speech during reading is ignored without a tap.
+
 **`take-photo`**
 - When the bridge answers a question with `take_photo` (a question about the scene, like
   这是什么), the agent shows 正在拍照…, takes a photo (`telephoto`, `normal` quality, no
@@ -77,7 +92,7 @@ event log on the glasses.
 3. **Card mode: end of reading is guessed.** In the card (`_current`) `AudioPlayer.play()`
    is unavailable, so answers are read with `speechSynthesis.speak()`, which never
    reports its end. Listening resumes after an estimate of the speech length; until then
-   an exit word is ignored unless you tap first.
+   a question or exit word spoken over it is still taken, but the voice goes on.
 4. **Card mode: reading scroll is paced by an estimate**, not by the real speech position.
 5. **Card mode: reading starts after the whole answer**, and `speak()` cannot be stopped,
    so a question asked mid-reading may overlap answer 1's voice with answer 2's.
@@ -89,42 +104,23 @@ event log on the glasses.
 7. **Timing** — with `debug: true`, ask for a long answer and note the timing line.
    A big gap between `synth` and `audio` is the glasses' speech engine. Are the gaps
    between sentence segments audible?
-8. **Tap while reading — still deaf at times (2026-10-20, `fresh-mic-on-tap`).** After a
-   tap during a long answer the screen says listening, but for 15–20 s (and sometimes until
-   the reading ends, or after it) nothing is heard; a second tap fixes it. The AIUI docs say
-   `end` means the recognition session is over, while the agent assumes the glasses report
-   `end` early and keep listening (seen once on the device). Suspect: the recognizer is
-   really ended, perhaps when the next sentence segment starts playing. Branch
-   `asr-diagnostics` logs it: with `debug: true` the hint shows the last 4 events, with
-   seconds since the tap, the recognizer number (`#2 start`, `#2 audiostart`,
-   `#2 speechstart`, `#2 interim …`, `#2 end`) and the voice segments (`voice 77` = a
-   segment of 77 characters starts, `voice end`). Note what it shows when it is deaf.
-
-   **Found (photo, 2026-10-20):** `0.0 #10 start | 0.4 #9 error network | 0.4 #9 audioend |
-   0.4 #9 end`, then nothing from `#10`. The aborted recognizer releases the mic only when it
-   ends, 0.4 s after the tap; the new one was started before that and heard nothing (the
-   same as "请讲… never processes" while the echo probe held the mic). **Fix on
-   `mic-handover`:** the new recognizer starts when the old one has ended (at most 1.5 s).
-   To check: does `#n start` still work 0.4 s after the tap (`start failed` would mean the
-   glasses want it inside the tap itself)? Then `#n audiostart` / `interim …` when you speak.
-
-   **Second photo (2026-10-20, `mic-handover`):** `0.4 #15 start | 16.0 #15 error network |
-   16.0 #15 audioend | 16.0 #15 end`. The handover worked, but `#15` heard nothing and
-   timed out after ~16 s without speech. In the echo probe (test D) the mic was opened
-   *before* the voice and heard the user 100%; here it is opened *while* the voice plays.
-   Taps that worked probably fell between two segments. **Fix on `pause-to-listen`:**
-   - a tap pauses the voice, opens the new mic, and ~0.3 s later the voice goes on from
-     the start of the sentence it was in (debug: `voice pause`, `#n start`, `voice 120`);
-   - an `end` more than 5 s after the start is a timeout: the screen leaves 聆听中
-     (ready, or speaking while reading), so it no longer claims to listen;
-   - after a reading, if the recognizer timed out, a new one is opened without a tap; if
-     the glasses refuse (`start failed`), the screen shows ready and a tap is needed.
-   To check: tap during several long answers in a row; each time it should hear you.
+8. **Talk over a long answer (`talk-to-interrupt`).** With `debug: true`, ask for a long
+   answer and speak over it several times, early, in the middle (after 20–30 s) and near
+   the end. Expected: the voice stops at your first words, the view jumps to the bottom
+   and shows them, and the question is asked as soon as you stop. During the reading the
+   hint should show `#n start`, `#n audiostart` every ~10–15 s between segments (the mic
+   being renewed). Things to note:
+   - Deaf after a renewal (`#n start` with no `audiostart`, or no `interim` when you speak):
+     the renewed mic may need a tap on the glasses (`start failed` in the hint).
+   - Audible gaps between sentences when the mic is renewed (up to ~1 s).
+   - Nearby talk or noise stopping the reading (expected; it is how the native assistant
+     works).
+   The earlier tap design and its history are in this file on `voice-gives-way` (item 8).
 9. **ASR session lifecycle** — after a tap, stay silent 20–30 s, then speak: still heard?
 10. **Card ↔ full screen** — ask in the card, switch to full screen, ask again: right layout,
     and does `synthesize()` (and sentence-by-sentence reading) take over?
-11. **Without a tap after reading** — speak right after an answer ends: heard? After a long
-    answer the old recognizer may have stopped; a new one can only open on a tap.
+11. **Without a tap after reading** — speak right after an answer ends, and again ~10 s
+    later: heard both times? The mic is renewed after the reading without a tap.
 12. **Long answer** — ask for a very long answer: does it stream and scroll smoothly?
 13. **Photo** — in full screen ask 这是什么 while looking at something: 正在拍照…, then an
     answer about it? Note the time. On 2026-10-25 the photo reached Hermes but Hermes said

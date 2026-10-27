@@ -576,7 +576,7 @@ export default {
       const arm = (ms) => { if (timer) clearTimeout(timer); timer = setTimeout(() => this._stopSpeaking(false), Math.min(300000, ms)) }
       const utterance = (text) => {
         const u = new SpeechSynthesisUtterance(text)
-        u.voice = zh ? (voices.zh || 'female-yujie') : (voices.en || 'English_radiant_girl')
+        u.voice = zh ? (voices.zh || 'male-qn-jingying') : (voices.en || 'English_radiant_girl')
         u.lang = zh ? 'zh-CN' : 'en-US'
         return u
       }

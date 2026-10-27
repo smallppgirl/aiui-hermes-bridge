@@ -142,7 +142,7 @@ for (const c of CASES) {
   const ans1 = (answered[0] && answered[0].a) || ''
   check(read1 && ans1.length > 0, `answer 1 received (${answered[0] ? 'HTTP ' + answered[0].status + ', ' : ''}${ans1.length} chars)` + (LIVE ? ': ' + JSON.stringify(ans1.slice(0, 60)) + '…' : ''))
   const firstVoice = (await hostLog()).find((l) => / voice=/.test(l))
-  const voice1 = isChinese(ans1) ? 'female-yujie' : 'English_radiant_girl'
+  const voice1 = isChinese(ans1) ? 'male-qn-jingying' : 'English_radiant_girl'
   const method = c.tts === 'synth' && c.target === '_blank' ? 'tts.synth' : 'tts.speak'
   check(firstVoice?.startsWith(method) && firstVoice.includes('voice=' + voice1), `answer 1 read with ${method.slice(4)}() in ${voice1}: ${firstVoice}`)
   const needsScroll = ans1.length > (isChinese(ans1) ? 200 : 450)
@@ -189,7 +189,7 @@ for (const c of CASES) {
   const ans2 = (answered[1] && answered[1].a) || ''
   check(read2 && ans2.length > 0, `answer 2 received (${ans2.length} chars)` + (LIVE ? ': ' + JSON.stringify(ans2.slice(0, 60)) : ''))
   const voices = (await hostLog()).filter((l) => / voice=/.test(l))
-  const voice2 = isChinese(ans2) ? 'female-yujie' : 'English_radiant_girl'
+  const voice2 = isChinese(ans2) ? 'male-qn-jingying' : 'English_radiant_girl'
   check(voices.length >= 2 && voices.at(-1).includes('voice=' + voice2), `answer 2 voice follows its language (${voice2}): ${voices.at(-1)}`)
   // read = the answer without its leading blank lines/spaces, in segments while it streams;
   // answer 1 up to where question 2 stopped it, answer 2 in full

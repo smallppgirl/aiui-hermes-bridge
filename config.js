@@ -23,10 +23,10 @@ export const BRIDGE_CONFIG = {
   readAloud: true,
   // TTS voices by language. The voice is picked from the language of each answer
   // (Chinese answer -> zh voice, English answer -> en voice), not the system language.
-  // zh = Chinese female (female-yujie / female-tianmei / lovely_girl / male variants
-  // male-qn-jingying, male-qn-qingse); en = English (English_radiant_girl /
-  // English_expressive_narrator / English_Trustworthy_Man).
-  ttsVoices: { zh: 'female-yujie', en: 'English_radiant_girl' },
+  // zh = Chinese (male-qn-jingying / male-qn-qingse / female-yujie / female-tianmei /
+  // lovely_girl); en = English (English_radiant_girl / English_expressive_narrator /
+  // English_Trustworthy_Man).
+  ttsVoices: { zh: 'male-qn-jingying', en: 'English_radiant_girl' },
   // true = show speech-recognition events (start / interim / final / error / end)
   // in the hint line, to diagnose listening problems on the glasses.
   debug: false,

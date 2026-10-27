@@ -96,7 +96,7 @@ test('card target: answers are read with speak() without trying synthesize()', a
   const p = makePage()
   p.onTargetChanged('_current', null)
   await askOnce(p, 'q', '回答')
-  assert.deepEqual(tts.log, ['speak:female-yujie'])
+  assert.deepEqual(tts.log, ['speak:male-qn-jingying'])
 })
 
 // ---------------- bridge request / SSE ----------------
@@ -530,7 +530,7 @@ test('voice follows the answer language, not the system language', async () => {
   const p = makePage({ lang: 'en-US' })
   await askOnce(p, '你好', '你好，很高兴见到你。')
   await askOnce(p, 'hello', 'Nice to meet you.')
-  assert.deepEqual(tts.log.filter((l) => l.startsWith('synth')), ['synth:female-yujie', 'synth:English_radiant_girl'])
+  assert.deepEqual(tts.log.filter((l) => l.startsWith('synth')), ['synth:male-qn-jingying', 'synth:English_radiant_girl'])
   assert.deepEqual(tts.utterances.map((u) => u.lang), ['zh-CN', 'en-US'])
 })
 
@@ -550,7 +550,7 @@ test('synthesize path: plays after canplay, back to listening on end', async () 
   await until(() => p.data.status === 'speaking')
   assert.equal(p.data.chip, '播报中')
   await until(idle(p))
-  assert.deepEqual(tts.log, ['synth:female-yujie', 'play', 'player.destroy'])
+  assert.deepEqual(tts.log, ['synth:male-qn-jingying', 'play', 'player.destroy'])
   assert.equal(p.data.status, 'listening')
   assert.equal(recs.length, 1)   // same recognizer kept
   assert.equal(p._tts, null)
@@ -661,7 +661,7 @@ test('synthesize fails: falls back to speak()', async () => {
   setTTS('synth-fail', 20)
   const p = makePage()
   await askOnce(p, 'q', '回答')
-  assert.deepEqual(tts.log, ['synth:female-yujie', 'speak:female-yujie'])
+  assert.deepEqual(tts.log, ['synth:male-qn-jingying', 'speak:male-qn-jingying'])
   assert.equal(p.data.status, 'listening')
 })
 
@@ -683,7 +683,7 @@ test('card target (play() unavailable): falls back to speak()', async () => {
   setTTS('synth-card', 20)
   const p = makePage()
   await askOnce(p, 'q', '回答')
-  assert.deepEqual(tts.log, ['synth:female-yujie', 'task.abort', 'player.destroy', 'speak:female-yujie'])
+  assert.deepEqual(tts.log, ['synth:male-qn-jingying', 'task.abort', 'player.destroy', 'speak:male-qn-jingying'])
   assert.equal(p.data.status, 'listening')
   assert.equal(p._tts, null)
 })
@@ -694,7 +694,7 @@ test('card target: after one play() failure, later answers use speak() directly'
   await askOnce(p, 'q1', '回答一')
   tts.log.length = 0
   await askOnce(p, 'q2', '回答二')
-  assert.deepEqual(tts.log, ['speak:female-yujie'])   // no wasted synthesize()
+  assert.deepEqual(tts.log, ['speak:male-qn-jingying'])   // no wasted synthesize()
 })
 
 test('synthesize: once generation ends, the safety net shrinks to the real length', async () => {
